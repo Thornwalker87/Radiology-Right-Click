@@ -20,6 +20,7 @@
 
 ; ================= SETTINGS (values are set in QC_Init) =================
 global QC_RadName, QC_IncludeReadBack, QC_OpenAtStart, QC_DialMode, QC_GVAccount
+global QC_AutoConfirm, QC_ConfirmDelayMs
 global QC_BookFile, QC_IniFile, QC_TickMs
 
 ; ================= STATE =================
@@ -56,6 +57,8 @@ QC_Init() {
     QC_OpenAtStart     := true      ; open the panel when the script starts
     QC_DialMode        := "url"     ; "url" = voice.google.com link | "tel" = tel: link
     QC_GVAccount       := 0         ; Google account index if signed into several
+    QC_AutoConfirm     := true      ; auto-press Call on Google Voice's "Call?" prompt
+    QC_ConfirmDelayMs  := 1500      ; ms to let the Voice page load before confirming
     QC_RadName         := "Dr. Harwood"
     QC_IncludeReadBack := true
     QC_TickMs          := 500       ; how often the panel checks it is still on top
@@ -897,8 +900,36 @@ QC_Dial(num, label := "") {
         MsgBox, 262192, Quick Call, Could not open the dialer link. Is a default browser set?
         return
     }
+    if (QC_AutoConfirm && QC_DialMode != "tel")
+        SetTimer, QC_ConfirmCall, -250
     QC_LastCall := {label: (label != "" ? label : QC_FormatPhone(d)), time: A_Now}
     QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d), 3000)
+}
+
+; Google Voice opens a "Call this number?" prompt. Wait for the Voice tab to be
+; in front, give the page time to load, then press Enter to confirm. Only fires
+; while a browser window titled "...Voice..." is active, so it never types into
+; PowerScribe or Sectra.
+QC_ConfirmCall() {
+    static tries := 0, seenAt := 0
+    if (tries = 0)
+        seenAt := 0
+    tries++
+    WinGet, proc, ProcessName, A
+    WinGetTitle, title, A
+    onVoice := RegExMatch(proc, "i)^(chrome|msedge|firefox|brave)\.exe$") && InStr(title, "Voice")
+    if (onVoice && !seenAt)
+        seenAt := A_TickCount
+    if (onVoice && A_TickCount - seenAt >= QC_ConfirmDelayMs) {
+        Send, {Enter}
+        tries := 0
+        return
+    }
+    if (tries > 60) {          ; ~15 s: give up quietly
+        tries := 0
+        return
+    }
+    SetTimer, QC_ConfirmCall, -250
 }
 
 QC_DialText(txt) {
