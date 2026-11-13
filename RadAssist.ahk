@@ -37,7 +37,7 @@ global TargetApps := ["ahk_exe Nuance.PowerScribe360.exe", "ahk_exe notepad.exe"
 ;       planned move to PowerScribe One). See RA_IsTargetApp().
 global TargetAppPattern := "i)powerscribe|^notepad\.exe$"
 global SectraWindowTitle := "Sectra"
-global DataminingPhrase := "SSM-lung nodule"
+global DataminingPhrase := "SSM lung nodule"
 global IncludeDatamining := true
 global ShowCitations := true
 global DefaultSmartParse := "Auto"    ; Options: Auto, Volume, RVLV, NASCET, Stenosis, Adrenal, Fleischner, ICH, Date
@@ -929,7 +929,7 @@ ShowFleischnerGui() {
     FleischnerGuiObj.Add("Text", "x10 y130", "Risk:")
     FleischnerGuiObj.Add("DropDownList", "x130 y127 w120 vFleischRisk Choose1", ["Low and High risk", "Low risk", "High risk"])
     dmChecked := IncludeDatamining ? "Checked" : ""
-    FleischnerGuiObj.Add("Checkbox", "x10 y160 w250 vFleischDatamine " dmChecked, "Include datamining phrase (SSM-lung nodule)")
+    FleischnerGuiObj.Add("Checkbox", "x10 y160 w250 vFleischDatamine " dmChecked, "Include datamining phrase (SSM lung nodule)")
     FleischnerGuiObj.Add("Button", "x10 y190 w100", "Get Recommendation").OnEvent("Click", CalcFleischner)
     FleischnerGuiObj.Add("Button", "x120 y190 w80", "Cancel").OnEvent("Click", FleischnerGuiClose)
     FleischnerGuiObj.OnEvent("Close", FleischnerGuiClose)
@@ -3413,9 +3413,7 @@ LoadPreferences() {
     if (FileExist(PreferencesPath)) {
         IncludeDatamining := IniRead(PreferencesPath, "Settings", "IncludeDatamining", "1")
         ShowCitations := IniRead(PreferencesPath, "Settings", "ShowCitations", "1")
-        DataminingPhrase := IniRead(PreferencesPath, "Settings", "DataminingPhrase", "SSM-lung nodule")
-        if (DataminingPhrase = "SSM lung nodule")   ; old default -> new hyphenated form
-            DataminingPhrase := "SSM-lung nodule"
+        DataminingPhrase := IniRead(PreferencesPath, "Settings", "DataminingPhrase", "SSM lung nodule")
         DefaultSmartParse := IniRead(PreferencesPath, "Settings", "DefaultSmartParse", "Auto")
         SmartParseConfirmation := IniRead(PreferencesPath, "Settings", "SmartParseConfirmation", "1")
         SmartParseFallbackToGUI := IniRead(PreferencesPath, "Settings", "SmartParseFallbackToGUI", "1")

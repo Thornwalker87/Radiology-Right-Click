@@ -25,7 +25,7 @@ SP_Init() {
     if (SP_Initialized)
         return
     SP_Initialized := true
-    SP_DataminingPhrase := "SSM-lung nodule"
+    SP_DataminingPhrase := "SSM lung nodule"
     SP_IncludeDatamining := true
     SP_FleischnerAtEnd := true       ; Fleischner / TI-RADS / O-RADS go at the end of the report
     SP_RVLVFormat := "Macro"         ; "Macro" = cm, "Inline" = mm
@@ -706,10 +706,96 @@ PE_WordNum(w, words) {
 ; ================= THYROID: ACR TI-RADS =================
 PE_TIRADS(text) {
     t := RegExReplace(text, "\R", "`n")
+    t := StrReplace(t, Chr(0xD7), "x")
     if PE_RX(t, "i)(?:^|\n)\s*(?:CLINICAL\s+)?IMPRESSIONS?\s*:", im)
         t := SubStr(t, 1, im.Pos(0) - 1)
-    t := RegExReplace(t, "\s+", " ")
-    t := StrReplace(t, Chr(0xD7), "x")
+    ; Skip the report header and the TI-RADS legend ("TR3 = ... If >2.5cm, FNA")
+    if PE_RX(t, "i)(?:^|\n)\s*FINDINGS\s*:", fm)
+        t := SubStr(t, fm.Pos(0) + fm.Len(0))
+    if (RegExMatch(t, "im)^\s*Composition\s*:") && RegExMatch(t, "im)^\s*Echogenicity\s*:"))
+        nodules := PE_TIRADSFromTemplate(t)
+    else
+        nodules := PE_TIRADSFromText(t)
+    if (nodules.Length() = 0)
+        return PE_Fail("Could not find a thyroid nodule with a size.`n`nTemplate: fill in the nodule's Size, Composition, Echogenicity, Shape, Margins and Echogenic Foci.`nFree text example: Right lobe: solid, hypoechoic, 1.5 cm nodule with macrocalcifications, wider-than-tall with smooth margins.")
+    out := "`n`nACR TI-RADS:"
+    vals := [], fnaCount := 0, conf := 90
+    for i, n in nodules {
+        sc := PE_TIRADSScore(n.text)
+        tr := PE_TIRADSLevel(sc.total)
+        rec := PE_TIRADSRec(tr, n.size)
+        if InStr(rec, "FNA recommended")
+            fnaCount++
+        num := n.num != "" ? n.num : i
+        out .= "`nNodule " num (n.loc != "" ? ", " n.loc : "") ", " PE_Fmt(n.size) " cm: TR" tr " (" PE_TIRADSName(tr) "), "
+        out .= sc.total " point" (sc.total = 1 ? "" : "s") ". " rec
+        out .= "`n    Points: " sc.detail
+        vals.Push(["Nodule " num, (n.loc != "" ? n.loc " " : "") PE_Fmt(n.size) " cm, " sc.total " pts, TR" tr (sc.missing != "" ? "  [assumed: " sc.missing "]" : "")])
+        if (sc.missing != "")
+            conf := Min(conf, 70)
+    }
+    if (fnaCount > 2)
+        out .= "`nNote: If multiple nodules meet FNA criteria, sample the two highest-scoring nodules."
+    if (nodules.Length() > 4)
+        out .= "`nNote: Only the four highest-scoring nodules need to be reported."
+    if (ShowCitations)
+        out .= "`nRef: Tessler FN et al. ACR TI-RADS. JACR 2017;14:587-595."
+    return PE_Ok("ACR TI-RADS", vals, out, conf, true)
+}
+
+; Structured template: one block per nodule, starting at its "Location:" line.
+; Fields still showing their picklist ("composition choices:Cystic/Solid/...") are skipped.
+PE_TIRADSFromTemplate(t) {
+    nodules := [], cur := "", lastHdr := ""
+    for _, line in StrSplit(t, "`n") {
+        line := Trim(line, " `t`r")
+        if RegExMatch(line, "i)^Nodule\b(?!s)\s*(?:number|no\.?|#)?\s*(\d*)", h) {
+            lastHdr := h1
+            continue
+        }
+        if RegExMatch(line, "i)^Follow-?up\s+details") {
+            cur := ""
+            continue
+        }
+        if !RegExMatch(line, "i)^([A-Za-z \-]+?)\s*:\s*(.*)$", f)
+            continue
+        label := Format("{:L}", Trim(f1)), val := Trim(f2)
+        if (label = "location") {
+            cur := {num: lastHdr, loc: "", size: 0, text: "", fields: ""}
+            nodules.Push(cur)
+            lastHdr := ""
+            if !InStr(val, "/")
+                cur.loc := PE_ThyroidLoc(val)
+            continue
+        }
+        if !IsObject(cur)
+            continue
+        if (label = "size") {
+            v := RegExReplace(val, "i)\(?\s*previously.*$")     ; current size only
+            cur.size := PE_TIRADSSize(v)
+        } else if RegExMatch(label, "^(?:composition|echogenicity|shape|margins?|echogenic foci)$") {
+            if (val != "" && !InStr(val, "choices") && !InStr(val, "/"))
+                cur.text .= label ": " val ". "
+        }
+    }
+    out := []
+    for _, n in nodules
+        if (n.size > 0)
+            out.Push(n)
+    return out
+}
+
+; Free dictation: a nodule is a sentence with "nodule" and a size, plus the
+; sentences that follow it.
+PE_TIRADSFromText(t) {
+    keep := ""
+    for _, line in StrSplit(t, "`n") {
+        ; template count lines / legend: "nodules >/= 1 cm", "TR3 = 3 pts"
+        if RegExMatch(line, "i)>\s*/?\s*=|not\s+described\s+below|^\s*TR\d\s*=|estimated\s+total\s+number")
+            continue
+        keep .= line "`n"
+    }
+    t := RegExReplace(keep, "\s+", " ")
     t := RegExReplace(t, "(?<!\d)\.(?!\d)|;", ".`n")
     nodules := [], cur := ""
     for _, s in StrSplit(t, "`n") {
@@ -721,7 +807,7 @@ PE_TIRADS(text) {
         if (hasNod && sz > 0) {
             if RegExMatch(s, "i)\bno\s+(?:\w+\s+){0,3}nodules?\b")
                 continue
-            cur := {text: s, size: sz}
+            cur := {text: s, size: sz, num: "", loc: ""}
             nodules.Push(cur)
         } else if IsObject(cur) {
             if (RegExMatch(s, "i)\b(?:nodules?|lobe|isthmus)\b") && !RegExMatch(s, "i)\b(?:it|this|the\s+nodule|which|there\s+is)\b"))
@@ -730,27 +816,9 @@ PE_TIRADS(text) {
                 cur.text .= " " s
         }
     }
-    if (nodules.Length() = 0)
-        return PE_Fail("Could not find a thyroid nodule with a size.`n`nExample: Right lobe: solid, hypoechoic, 1.5 cm nodule with macrocalcifications, wider-than-tall with smooth margins.")
-    out := "`n`nACR TI-RADS:"
-    vals := [], fnaCount := 0, conf := 90
-    for i, n in nodules {
-        sc := PE_TIRADSScore(n.text)
-        tr := PE_TIRADSLevel(sc.total)
-        rec := PE_TIRADSRec(tr, n.size)
-        if InStr(rec, "FNA recommended")
-            fnaCount++
-        loc := PE_ThyroidLoc(n.text)
-        out .= "`nNodule " i (loc != "" ? " (" loc ")" : "") ", " PE_Fmt(n.size) " cm: " sc.detail
-        out .= " = " sc.total " point" (sc.total = 1 ? "" : "s") ", TR" tr " (" PE_TIRADSName(tr) "). " rec
-        vals.Push(["Nodule " i, (loc != "" ? loc " " : "") PE_Fmt(n.size) " cm, " sc.total " pts, TR" tr (sc.missing != "" ? "  [assumed: " sc.missing "]" : "")])
-        if (sc.missing != "")
-            conf := Min(conf, 70)
-    }
-    if (fnaCount > 2)
-        out .= "`nNote: ACR TI-RADS suggests FNA of no more than two nodules, those with the highest point totals."
-    out .= "`nRef: Tessler FN et al. ACR Thyroid Imaging, Reporting and Data System (TI-RADS). JACR 2017;14:587-595."
-    return PE_Ok("ACR TI-RADS", vals, out, conf, true)
+    for _, n in nodules
+        n.loc := PE_ThyroidLoc(n.text)
+    return nodules
 }
 
 PE_TIRADSSize(s) {
@@ -772,12 +840,13 @@ PE_TIRADSSize(s) {
 }
 
 PE_TIRADSScore(s) {
+    s := StrReplace(s, "&", " and ")
     t := RegExReplace(s, "i)\b(?:no|without|absent|negative\s+for)\s+(?:\w+[\s,]+){0,4}?(?:micro|macro)?calcifications?|\b(?:no|without)\s+(?:\w+\s+){0,3}?echogenic\s+foci", " ")
     t := RegExReplace(t, "i)\b(?:no|without)\s+(?:evidence\s+of\s+)?extra-?\s?thyroidal\s+extension", " ")
     t := RegExReplace(t, "i)\bnot\s+taller[- ]than[- ]wide", " wider-than-tall")
     missing := ""
     if RegExMatch(t, "i)spongiform")
-        return {total: 0, detail: "spongiform (0; other features not scored)", missing: ""}
+        return {total: 0, detail: "spongiform 0 (inherently benign; no further points added)", missing: ""}
     if RegExMatch(t, "i)mixed|partially\s+cystic|predominantly\s+(?:solid|cystic)|solid\s+and\s+cystic|cystic\s+and\s+solid|complex\s+cystic|cystic\s+(?:and|with)\s+solid|solid\s+(?:with|and)\s+cystic")
         comp := 1, cname := "mixed cystic and solid"
     else if (RegExMatch(t, "i)(?:purely|completely|entirely|almost\s+completely|simple)\s+cystic|\bcyst\b|anechoic\s+cyst|\bcystic\b") && !RegExMatch(t, "i)\bsolid\b"))
@@ -816,14 +885,14 @@ PE_TIRADSScore(s) {
     foci := 0, fnames := ""
     if RegExMatch(t, "i)microcalcification|punctate\s+(?:echogenic\s+foci|calcification)|psammoma")
         foci += 3, fnames .= "punctate echogenic foci (3) "
-    if RegExMatch(t, "i)peripheral\s+(?:rim\s+)?calcification|rim\s+calcification|eggshell|peripheral\s+calcific")
+    if RegExMatch(t, "i)peripheral\s+(?:rim\s+)?calcification|rim\s+calcification|eggshell|peripheral\s+calcific|peripheral\s+or\s+rim")
         foci += 2, fnames .= "peripheral calcifications (2) "
-    if RegExMatch(t, "i)macro-?\s?calcification|coarse\s+calcification|large\s+calcification")
+    if RegExMatch(t, "i)macro-?\s?calc|coarse\s+calcification|large\s+calcification")
         foci += 1, fnames .= "macrocalcifications (1) "
     if (fnames = "")
         fnames := RegExMatch(t, "i)comet[- ]tail") ? "comet-tail artifacts (0) " : "no echogenic foci (0) "
     total := comp + echo + shape + margin + foci
-    detail := cname " (" comp "), " ename " (" echo "), " sname " (" shape "), " mname " (" margin "), " Trim(fnames)
+    detail := cname " " comp " + " ename " " echo " + " sname " " shape " + " mname " " margin " + " RTrim(RegExReplace(Trim(fnames), "\((\d)\)\s*", "$1 + "), " +")
     return {total: total, detail: detail, missing: Trim(missing)}
 }
 
@@ -837,14 +906,14 @@ PE_TIRADSName(tr) {
 
 PE_TIRADSRec(tr, cm) {
     fna := [0, 0, 2.5, 1.5, 1.0], fu := [0, 0, 1.5, 1.0, 0.5]
-    when := ["", "", "ultrasound at 1, 3 and 5 years", "ultrasound at 1, 2, 3 and 5 years", "ultrasound annually for up to 5 years"]
+    when := ["", "", "at 1, 3 and 5 years", "at 1, 2, 3 and 5 years", "yearly for 5 years"]
     if (tr <= 2)
         return "No FNA."
     if (cm >= fna[tr])
-        return "FNA recommended (TR" tr " nodule " PE_Fmt(fna[tr]) " cm or larger)."
+        return "FNA recommended."
     if (cm >= fu[tr])
-        return "Follow-up " when[tr] " (TR" tr " nodule " PE_Fmt(fu[tr]) " cm or larger)."
-    return "No FNA or follow-up needed based on size."
+        return "No FNA. Follow-up ultrasound " when[tr] "."
+    return "No FNA or follow-up needed."
 }
 
 PE_ThyroidLoc(s) {
