@@ -4476,7 +4476,8 @@ QC_Init() {
 
     ; ---- user settings ----
     QC_OpenAtStart     := true      ; open the panel when the script starts
-    QC_DialMode        := "url"     ; "url" = voice.google.com link | "tel" = tel: link
+    QC_DialMode        := "url"     ; "url" = Google Voice | "teams" = Microsoft Teams | "tel" = tel: link
+                                    ; (also switchable by right-clicking a panel button; the choice is saved)
     QC_GVAccount       := 0         ; Google account index if signed into several
     QC_AutoConfirm     := true      ; auto-press Call on Google Voice's "Call?" prompt
     QC_ConfirmDelayMs  := 1500      ; ms to let the Voice page load before confirming
@@ -4501,6 +4502,9 @@ QC_Init() {
     IniRead, QC_H, %QC_IniFile%, Panel, H, %A_Space%
     IniRead, col, %QC_IniFile%, Panel, Collapsed, 0
     QC_Collapsed := (col = "1")
+    IniRead, dm, %QC_IniFile%, Settings, DialMode, %A_Space%
+    if RegExMatch(dm, "^(url|teams|tel)$")
+        QC_DialMode := dm
     QC_CW := 0, QC_CH := 0
     OnExit("QC_OnExit")
     OnMessage(0xA3, "QC_OnDblClick")      ; double-click title bar
@@ -5111,6 +5115,11 @@ QC_Panel_ContextMenu(GuiHwnd := 0, CtrlHwnd := 0, EventInfo := "", IsRightClick 
     Menu, QCCtx, Add, Rename..., QC_CtxRename
     Menu, QCCtx, Add
     Menu, QCCtx, Add, Open phone book editor..., QC_MenuEditor
+    Menu, QCCtx, Add
+    Menu, QCCtx, Add, Call with Google Voice, QC_CtxModeGV
+    Menu, QCCtx, Add, Call with Microsoft Teams, QC_CtxModeTeams
+    Menu, QCCtx, % (QC_DialMode = "url" ? "Check" : "Uncheck"), Call with Google Voice
+    Menu, QCCtx, % (QC_DialMode = "teams" ? "Check" : "Uncheck"), Call with Microsoft Teams
     Menu, QCCtx, Show
 }
 QC_CtxEditNum(p1 := "", p2 := "", p3 := "") {
@@ -5326,17 +5335,41 @@ QC_Dial(num, label := "") {
     }
     if (QC_DialMode = "tel")
         url := "tel:+1" d
+    else if (QC_DialMode = "teams")
+        url := "msteams:/l/call/0/0?users=4:%2B1" d     ; Teams app, number ready to call
     else
         url := "https://voice.google.com/u/" QC_GVAccount "/calls?a=nc,%2B1" d
+    ok := true
     try Run, %url%
-    catch {
+    catch
+        ok := false
+    if (!ok && QC_DialMode = "teams") {    ; Teams app not registered: use Teams on the web
+        url := "https://teams.microsoft.com/l/call/0/0?users=4:%2B1" d
+        ok := true
+        try Run, %url%
+        catch
+            ok := false
+    }
+    if (!ok) {
         MsgBox, 262192, Quick Call, Could not open the dialer link. Is a default browser set?
         return
     }
-    if (QC_AutoConfirm && QC_DialMode != "tel")
+    if (QC_AutoConfirm && QC_DialMode = "url")
         SetTimer, QC_ConfirmCall, -250
     QC_LastCall := {label: (label != "" ? label : QC_FormatPhone(d)), time: A_Now}
-    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d), 3000)
+    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : ""), 3000)
+}
+
+QC_SetDialMode(mode) {
+    QC_DialMode := mode
+    IniWrite, %mode%, %QC_IniFile%, Settings, DialMode
+    QC_Tip("Quick Call now dials with " (mode = "teams" ? "Microsoft Teams" : mode = "tel" ? "the phone app (tel:)" : "Google Voice"), 2000)
+}
+QC_CtxModeGV(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("url")
+}
+QC_CtxModeTeams(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("teams")
 }
 
 ; Google Voice opens a "Call this number?" prompt. Wait for the Voice tab to be
