@@ -604,6 +604,7 @@ QC_OnExit(ExitReason := "", ExitCode := "") {
 
 ; Keeps the panel above Sectra/PowerScribe and remembers the last non-browser window
 QC_Tick() {
+    static lastObs := 0, lastRaise := 0
     activePid := 0
     WinGet, a, ID, A
     if (a) {
@@ -620,12 +621,23 @@ QC_Tick() {
         return
     if (activePid = QC_Pid)    ; one of our own windows or menus is active
         return
-    ; Re-assert topmost every tick (cheap, no flicker). 0x13 = NOSIZE|NOMOVE|NOACTIVATE
-    DllCall("SetWindowPos", "Ptr", QC_PanelHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
+    ; Only touch the z-order when something is actually wrong: every
+    ; SetWindowPos repaints the title bar, which made the close X blink.
+    ; 0x13 = NOSIZE|NOMOVE|NOACTIVATE
+    WinGet, exStyle, ExStyle, ahk_id %QC_PanelHwnd%
+    if !(exStyle & 0x8)    ; lost WS_EX_TOPMOST
+        DllCall("SetWindowPos", "Ptr", QC_PanelHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
     ; Sectra / PowerScribe windows that are themselves topmost can still sit
     ; above us; if anything covers the panel, bump it to the top of the band.
-    if QC_IsObscured(QC_PanelHwnd)
+    ; If the same window is still on top right after a bump, it is winning the
+    ; topmost fight (or is an invisible overlay), so retry only every 10 s.
+    obs := QC_IsObscured(QC_PanelHwnd)
+    if (!obs) {
+        lastObs := 0
+    } else if (obs != lastObs || A_TickCount - lastRaise > 10000) {
         QC_RaiseTop(QC_PanelHwnd)
+        lastObs := obs, lastRaise := A_TickCount
+    }
 }
 
 ; Move the panel to the very top of the always-on-top band without activating it.
@@ -656,7 +668,7 @@ QC_IsObscured(h) {
         WinGetClass, cls, ahk_id %root%
         if RegExMatch(cls, shellCls)
             continue
-        return true
+        return root   ; the covering window (truthy)
     }
     return false
 }

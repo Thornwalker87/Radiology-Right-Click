@@ -25,7 +25,7 @@ SP_Init() {
     if (SP_Initialized)
         return
     SP_Initialized := true
-    SP_DataminingPhrase := "SSM lung nodule"
+    SP_DataminingPhrase := "SSM-lung nodule"
     SP_IncludeDatamining := true
     SP_FleischnerAtEnd := true       ; Fleischner / TI-RADS / O-RADS go at the end of the report
     SP_RVLVFormat := "Macro"         ; "Macro" = cm, "Inline" = mm
@@ -586,7 +586,7 @@ PE_Fleischner(text) {
     r .= "`nLOW RISK recommendation:`n" recLow
     r .= "`n`nHIGH RISK recommendation:`n" recHigh
     if (SP_IncludeDatamining)
-        r .= "`n`nData Mining: " SP_DataminingPhrase " . ACR and AMA MIPS #364"
+        r .= "`n`n" SP_DataminingPhrase "`nACR and AMA MIPS #364"
     r .= "`n`nNote: The need for followup depends on clinical discussion of patient's comorbid conditions, demographics, and willingness to undergo followup imaging and potential intervention."
     if (ShowCitations)
         r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"

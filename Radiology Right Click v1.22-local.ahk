@@ -2711,7 +2711,7 @@ ProcessNodules(text) {
     } else {
         result .= "A solitary pulmonary nodule is described forming the basis of follow-up:`n"
     }
-    esult .= "- Location: " . (mostSignificantNodule.Location ? mostSignificantNodule.Location : "Not specified") . "`n"
+    result .= "- Location: " . (mostSignificantNodule.Location ? mostSignificantNodule.Location : "Not specified") . "`n"
     result .= "- Extracted (or inferred) Size: " . mostSignificantNodule.mString . "`n"
     result .= "- Fleischner Size (mm): " . Format("{:.1f} mm", mostSignificantNodule.Size()) . "`n"
     result .= "- Composition (or inferred): " . (mostSignificantNodule.Composition ? mostSignificantNodule.Composition : "solid") . "`n"
@@ -2741,6 +2741,8 @@ ProcessNodules(text) {
             result .= "Incidental calcified nodules do not typically require routine follow up.`n"
         }
     }
+
+    result .= "`n`nSSM-lung nodule"
 
     if (globalHighRisk || mostSignificantNodule.Morphology == "spiculated")
         result .= "`n`nNote: Patient has risk factors or morphologic characteristics that may increase the risk of lung cancer."
@@ -3929,6 +3931,7 @@ QC_OnExit(ExitReason := "", ExitCode := "") {
 
 ; Keeps the panel above Sectra/PowerScribe and remembers the last non-browser window
 QC_Tick() {
+    static lastObs := 0, lastRaise := 0
     activePid := 0
     WinGet, a, ID, A
     if (a) {
@@ -3945,12 +3948,23 @@ QC_Tick() {
         return
     if (activePid = QC_Pid)    ; one of our own windows or menus is active
         return
-    ; Re-assert topmost every tick (cheap, no flicker). 0x13 = NOSIZE|NOMOVE|NOACTIVATE
-    DllCall("SetWindowPos", "Ptr", QC_PanelHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
+    ; Only touch the z-order when something is actually wrong: every
+    ; SetWindowPos repaints the title bar, which made the close X blink.
+    ; 0x13 = NOSIZE|NOMOVE|NOACTIVATE
+    WinGet, exStyle, ExStyle, ahk_id %QC_PanelHwnd%
+    if !(exStyle & 0x8)    ; lost WS_EX_TOPMOST
+        DllCall("SetWindowPos", "Ptr", QC_PanelHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
     ; Sectra / PowerScribe windows that are themselves topmost can still sit
     ; above us; if anything covers the panel, bump it to the top of the band.
-    if QC_IsObscured(QC_PanelHwnd)
+    ; If the same window is still on top right after a bump, it is winning the
+    ; topmost fight (or is an invisible overlay), so retry only every 10 s.
+    obs := QC_IsObscured(QC_PanelHwnd)
+    if (!obs) {
+        lastObs := 0
+    } else if (obs != lastObs || A_TickCount - lastRaise > 10000) {
         QC_RaiseTop(QC_PanelHwnd)
+        lastObs := obs, lastRaise := A_TickCount
+    }
 }
 
 ; Move the panel to the very top of the always-on-top band without activating it.
@@ -3981,7 +3995,7 @@ QC_IsObscured(h) {
         WinGetClass, cls, ahk_id %root%
         if RegExMatch(cls, shellCls)
             continue
-        return true
+        return root   ; the covering window (truthy)
     }
     return false
 }
@@ -4373,7 +4387,7 @@ SP_Init() {
     if (SP_Initialized)
         return
     SP_Initialized := true
-    SP_DataminingPhrase := "SSM lung nodule"
+    SP_DataminingPhrase := "SSM-lung nodule"
     SP_IncludeDatamining := true
     SP_FleischnerAtEnd := true       ; Fleischner / TI-RADS / O-RADS go at the end of the report
     SP_RVLVFormat := "Macro"         ; "Macro" = cm, "Inline" = mm
@@ -4934,7 +4948,7 @@ PE_Fleischner(text) {
     r .= "`nLOW RISK recommendation:`n" recLow
     r .= "`n`nHIGH RISK recommendation:`n" recHigh
     if (SP_IncludeDatamining)
-        r .= "`n`nData Mining: " SP_DataminingPhrase " . ACR and AMA MIPS #364"
+        r .= "`n`n" SP_DataminingPhrase "`nACR and AMA MIPS #364"
     r .= "`n`nNote: The need for followup depends on clinical discussion of patient's comorbid conditions, demographics, and willingness to undergo followup imaging and potential intervention."
     if (ShowCitations)
         r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"

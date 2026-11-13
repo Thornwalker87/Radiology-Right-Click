@@ -37,7 +37,7 @@ global TargetApps := ["ahk_exe Nuance.PowerScribe360.exe", "ahk_exe notepad.exe"
 ;       planned move to PowerScribe One). See RA_IsTargetApp().
 global TargetAppPattern := "i)powerscribe|^notepad\.exe$"
 global SectraWindowTitle := "Sectra"
-global DataminingPhrase := "SSM lung nodule"
+global DataminingPhrase := "SSM-lung nodule"
 global IncludeDatamining := true
 global ShowCitations := true
 global DefaultSmartParse := "Auto"    ; Options: Auto, Volume, RVLV, NASCET, Stenosis, Adrenal, Fleischner, ICH, Date
@@ -929,7 +929,7 @@ ShowFleischnerGui() {
     FleischnerGuiObj.Add("Text", "x10 y130", "Risk:")
     FleischnerGuiObj.Add("DropDownList", "x130 y127 w120 vFleischRisk Choose1", ["Low and High risk", "Low risk", "High risk"])
     dmChecked := IncludeDatamining ? "Checked" : ""
-    FleischnerGuiObj.Add("Checkbox", "x10 y160 w250 vFleischDatamine " dmChecked, "Include datamining phrase (SSM lung nodule)")
+    FleischnerGuiObj.Add("Checkbox", "x10 y160 w250 vFleischDatamine " dmChecked, "Include datamining phrase (SSM-lung nodule)")
     FleischnerGuiObj.Add("Button", "x10 y190 w100", "Get Recommendation").OnEvent("Click", CalcFleischner)
     FleischnerGuiObj.Add("Button", "x120 y190 w80", "Cancel").OnEvent("Click", FleischnerGuiClose)
     FleischnerGuiObj.OnEvent("Close", FleischnerGuiClose)
@@ -970,7 +970,7 @@ CalcFleischner(*) {
     }
 
     if (saved.FleischDatamine) {
-        result .= "`n`n[" DataminingPhrase "]"
+        result .= "`n`n" DataminingPhrase
     }
 
     if (ShowCitations)
@@ -2081,7 +2081,7 @@ PE_Fleischner(text) {
     r .= "`nLOW RISK recommendation:`n" recLow
     r .= "`n`nHIGH RISK recommendation:`n" recHigh
     if (IncludeDatamining)
-        r .= "`n`nData Mining: " DataminingPhrase " . ACR and AMA MIPS #364"
+        r .= "`n`n" DataminingPhrase "`nACR and AMA MIPS #364"
     r .= "`n`nNote: The need for followup depends on clinical discussion of patient's comorbid conditions, demographics, and willingness to undergo followup imaging and potential intervention."
     if (ShowCitations)
         r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"
@@ -3413,7 +3413,9 @@ LoadPreferences() {
     if (FileExist(PreferencesPath)) {
         IncludeDatamining := IniRead(PreferencesPath, "Settings", "IncludeDatamining", "1")
         ShowCitations := IniRead(PreferencesPath, "Settings", "ShowCitations", "1")
-        DataminingPhrase := IniRead(PreferencesPath, "Settings", "DataminingPhrase", "SSM lung nodule")
+        DataminingPhrase := IniRead(PreferencesPath, "Settings", "DataminingPhrase", "SSM-lung nodule")
+        if (DataminingPhrase = "SSM lung nodule")   ; old default -> new hyphenated form
+            DataminingPhrase := "SSM-lung nodule"
         DefaultSmartParse := IniRead(PreferencesPath, "Settings", "DefaultSmartParse", "Auto")
         SmartParseConfirmation := IniRead(PreferencesPath, "Settings", "SmartParseConfirmation", "1")
         SmartParseFallbackToGUI := IniRead(PreferencesPath, "Settings", "SmartParseFallbackToGUI", "1")
@@ -4015,6 +4017,7 @@ QC_OnExit(*) {
 ; Keeps the panel above Sectra/PowerScribe and remembers the last non-browser window
 QC_Tick() {
     global QC_LastExtWin
+    static lastObs := 0, lastRaise := 0
     try {
         a := WinExist("A")
         if (a && WinGetPID(a) != QC_Pid) {
@@ -4030,12 +4033,21 @@ QC_Tick() {
             return
         if (WinGetPID("A") = QC_Pid)   ; one of our own windows or menus is active
             return
-        ; Re-assert topmost every tick (cheap, no flicker)
-        DllCall("SetWindowPos", "Ptr", h, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
+        ; Only touch the z-order when something is actually wrong: every
+        ; SetWindowPos repaints the title bar, which made the close X blink.
+        if !(WinGetExStyle(h) & 0x8)    ; lost WS_EX_TOPMOST
+            DllCall("SetWindowPos", "Ptr", h, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
         ; Sectra / PowerScribe windows that are themselves topmost can still sit
         ; above us; if anything covers the panel, bump it to the top of the band.
-        if QC_IsObscured(h)
+        ; If the same window is still on top right after a bump, it is winning the
+        ; topmost fight (or is an invisible overlay), so retry only every 10 s.
+        obs := QC_IsObscured(h)
+        if !obs {
+            lastObs := 0
+        } else if (obs != lastObs || A_TickCount - lastRaise > 10000) {
             QC_RaiseTop(h)
+            lastObs := obs, lastRaise := A_TickCount
+        }
     }
 }
 
@@ -4075,7 +4087,7 @@ QC_IsObscured(h) {
         } catch {
             continue
         }
-        return true
+        return root   ; the covering window (truthy)
     }
     return false
 }
