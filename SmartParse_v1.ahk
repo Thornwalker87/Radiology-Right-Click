@@ -6,7 +6,8 @@
 ; Highlight dictated text -> right-click -> Smart Parse (Auto-detect) or Smart Parse as...
 ;   Volume (prostate graded), ICH ABC/2, RV/LV, NASCET / any-vessel stenosis,
 ;   adrenal washout, Fleischner 2017, follow-up date, ACR TI-RADS, ovarian cyst
-;   (O-RADS US + SRU), Bone age (Greulich & Pyle) window.
+;   (O-RADS US + SRU), Bone age (Greulich & Pyle) window, LI-RADS window (CT/MRI v2018,
+;   CEUS v2027, US Surveillance v2024, Treatment Response v2024).
 ; Every PE_* function is pure (text in, result object out) so it can be tested
 ; without any GUI. Results: {ok, title, values: [[label, value], ...], text, conf,
 ; atImpression} or {ok: false, err}.
@@ -20,6 +21,12 @@ global SP_DataminingPhrase, SP_IncludeDatamining, SP_FleischnerAtEnd, SP_RVLVFor
 global SPB_Bone, SPB_Chrono, SPB_Dob, SPB_Exam, SPB_Sex, SPB_Preview    ; bone age GUI controls
 global SP_Initialized, SP_Pid
 global SP_ShowParse, SP_ShowTIRADS, SP_ShowORADS, SP_ShowBoneAge     ; set by the host (Preferences)
+global SP_ShowLIRADS                                                  ; set by the host (Preferences, off by default)
+global SP_LRHwnd, SP_LRText, SPL_Size, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr, SPL_Preview   ; LI-RADS GUI
+global SP_LRMode, SP_LRPrefill, SP_LRCeusAgent, SP_LRLastTx, SPL_Mode
+global SPC_Size, SPC_Agent, SPC_APHE, SPC_WO, SPC_Anc, SPC_TIV, SPC_Ovr, SPC_Adq      ; CEUS LI-RADS controls
+global SPU_Cat, SPU_Vis, SPU_AFP, SPU_Risk                                          ; US surveillance controls
+global SPT_Tx, SPT_Mass, SPT_AF, SPT_Intra, SPT_Peri, SPT_NE, SPT_Size               ; treatment response controls
 
 SP_Init() {
     if (SP_Initialized)
@@ -339,13 +346,50 @@ PE_RVLVInterp(ratio) {
 }
 
 ; ================= STENOSIS / NASCET =================
+; Remove numbers that are not vessel diameters before the stenosis parse:
+; velocities (250 cm/s), segment lengths (over 4 cm, 1.5 cm segment), "2 x 1.5 mm" -> 1.5 mm,
+; segment names (M1, A2, P1, C4, V4).
+PE_StenPrep(t) {
+    static words := ["one", "two", "three", "four", "five", "six", "seven"]
+    n := PE_N(), u := PE_U()
+    t := RegExReplace(t, "i)" n "\s*(?:cm|mm|m)\s*(?:/|per\s+)\s*(?:s|sec(?:ond)?)\b", "")
+    t := RegExReplace(t, "i)\b(?:over|spanning|extending\s+(?:over|for)|for|length\s+of|along)\s+(?:a\s+|an\s+|approximately\s+|about\s+)?" n "\s*" u "(?:\s+(?:segment|length|distance))?", "")
+    t := RegExReplace(t, "i)" n "\s*-?\s*" u "\s*(?:-?\s*long\b|in\s+length|(?:long\s+)?segment\b|length\b)", "")
+    while PE_RX(t, "i)" n "\s*" u "?\s*(?:x|by)\s*" n "\s*" u, m) {
+        v := Min(m[1] + 0, m[3] + 0), un := (m[2] != "") ? m[2] : m[4]
+        t := SubStr(t, 1, m.Pos(0) - 1) PE_Fmt(v, 2) " " un SubStr(t, m.Pos(0) + m.Len(0))
+    }
+    while PE_RX(t, "\b([MAPCV])([1-7])\b", m)
+        t := SubStr(t, 1, m.Pos(0) - 1) m[1] "-" words[m[2] + 0] SubStr(t, m.Pos(0) + m.Len(0))
+    return t
+}
+
 PE_Stenosis(text, forceNascet := false) {
-    t := PE_Clean(text)
-    stenRe := "(?:residual\s+(?:lumen|luminal\s+diameter|diameter)|minimal\s+lumen(?:al)?(?:\s+diameter)?|\bMLD\b|narrowest|tightest|narrowing|narrowed|stenos[ie]s|stenotic|lumen\s+at\s+the\s+(?:stenosis|narrowing))"
-    normRe := "(?:\bnormal|\breference|\bdistal|non-?stenotic|unaffected|uninvolved|beyond\s+the\s+(?:stenosis|narrowing)|downstream)"
-    sten := PE_ValueAfter(t, stenRe, normRe)
-    norm := PE_ValueAfter(t, normRe, stenRe)
-    conf := 90
+    t := PE_StenPrep(PE_Clean(text))
+    stenRe := "(?:residual\s+(?:lumen|luminal\s+diameter|diameter)|minimal\s+lumen(?:al)?(?:\s+diameter)?|\bMLD\b|narrowest|tightest|narrowing|narrowed|stenos[ie]s|(?<!post-)(?<!post)stenotic|lumen\s+at\s+the\s+(?:stenosis|narrowing))"
+    normRe := "(?:\bnormal|\breference|\bdistal|non-?stenotic|unaffected|uninvolved|beyond\s+the\s+(?:stenosis|narrowing)|downstream|post-?stenotic)"
+    conf := 90, sten := "", norm := ""
+    ; "narrowing from 6 mm to 2 mm"
+    if PE_RX(t, "i)\bfrom\s+" PE_N() "\s*" PE_U() "?(?:\s+\w+){0,3}?\s+to\s+" PE_N() "\s*" PE_U() "?", fm) {
+        a := {val: fm[1] + 0, unit: PE_Unit(fm[2])}, b := {val: fm[3] + 0, unit: PE_Unit(fm[4])}
+        ua := (a.unit != "") ? a.unit : b.unit, ub := (b.unit != "") ? b.unit : a.unit
+        if (PE_ToMm(a.val, ua) > PE_ToMm(b.val, ub))
+            norm := a, sten := b
+        else
+            norm := b, sten := a
+    }
+    if !IsObject(sten) {
+        sten := PE_ValueAfter(t, stenRe, normRe)
+        norm := PE_ValueAfter(t, normRe, stenRe)
+        ; "1.6 mm at the stenosis", "2 mm of residual lumen" (number before the word)
+        if PE_RX(t, "i)" PE_N() "\s*-?\s*" PE_U() "?\s+(?:of\s+)?(?:(?:at|in)\s+(?:the\s+)?(?:site\s+of\s+(?:the\s+)?)?)?(?:stenosis|narrowing|narrowest|tightest|residual\s+lumen)", m)
+            sten := {val: m[1] + 0, unit: PE_Unit(m[2])}
+        ; "measuring 6 mm distally", "5 mm beyond the stenosis", "5 mm in the more distal vessel"
+        if PE_RX(t, "i)" PE_N() "\s*-?\s*" PE_U() "?(?:\s+(?:in\s+)?(?:the\s+)?(?:more\s+)?(?:\w+\s+){0,2}?)?(?:distally|downstream|beyond\s+the\s+(?:stenosis|narrowing)|in\s+the\s+(?:more\s+)?distal\s+\w+)", m) {
+            if (!IsObject(norm) || (IsObject(sten) && norm.val = sten.val && norm.unit = sten.unit))
+                norm := {val: m[1] + 0, unit: PE_Unit(m[2])}
+        }
+    }
     if (!IsObject(sten) && PE_RX(t, "i)" PE_N() "\s*-?\s*" PE_U() "?\s+(?:residual\s+lumen|stenosis|narrowing)", m))
         sten := {val: m[1] + 0, unit: PE_Unit(m[2])}
     if (!IsObject(sten) || !IsObject(norm) || (sten.val = norm.val && sten.unit = norm.unit)) {
@@ -358,7 +402,7 @@ PE_Stenosis(text, forceNascet := false) {
                 sten := b, norm := a
             conf := 60
         } else {
-            return PE_Fail("Could not find a stenosis measurement and a normal (reference) measurement.`n`nExamples:`n- The proximal ICA residual lumen measures 1.2 mm and the normal distal cervical ICA measures 4.5 mm.`n- The SMA has a focal narrowing measuring 2 mm with a normal distal caliber of 6 mm.")
+            return PE_Fail("Could not find a stenosis measurement and a normal (reference) measurement.`n`nExamples:`n- The proximal ICA residual lumen measures 1.2 mm and the normal distal cervical ICA measures 4.5 mm.`n- The SMA has a focal narrowing measuring 2 mm with a normal distal caliber of 6 mm.`n- Short segment narrowing with luminal diameter measuring 2 mm and measuring 6 mm distally.`n- Narrowing of the left renal artery from 5 mm to 2 mm.")
         }
     }
     sU := sten.unit != "" ? sten.unit : ((norm.unit = "cm" && sten.val < 2) ? "cm" : "mm")
@@ -566,15 +610,34 @@ PE_Fleischner(text) {
         else
             maxPart := Max(maxPart, f.size)
     }
-    r := "`n`n___________________________________________________________`n"
+    ; Impression sentence: "Multiple solid pulmonary nodules, the largest measuring 7 mm in the right upper lobe."
+    big := found[1], nTypes := 0, seen := {}
+    for _, f in found {
+        if !seen.HasKey(f.type)
+            seen[f.type] := true, nTypes++
+        if (f.size > big.size)
+            big := f
+    }
+    tn := {solid: "solid", subsolid: "ground-glass", "part-solid": "part-solid"}
+    mix := ""
+    for _, k in ["solid", "part-solid", "subsolid"]
+        if seen.HasKey(k)
+            mix .= (mix != "" ? " and " : "") tn[k]
+    if (nTypes = 1)
+        typeDesc := tn[big.type] " "
+    else
+        typeDesc := ""
+    sizeTxt := big.sub6 ? "less than 6 mm" : PE_Fmt(big.size) " mm"
+    if (isMultiple)
+        r := "`n`nMultiple " typeDesc "pulmonary nodules" (typeDesc = "" ? " (" mix ")" : "")
+            . ", the largest measuring " sizeTxt (typeDesc = "" ? " (" tn[big.type] ")" : "")
+    else
+        r := "`n`nSingle " typeDesc "pulmonary nodule measuring " sizeTxt
+    r .= (big.lobe != "" ? " in the " big.lobe : "") ". Recommendations for follow-up as detailed below."
+    r .= "`n`n___________________________________________________________`n"
     r .= "Incidental Lung Nodule Discussion:`n"
     r .= "2017 ACR Fleischner Society expert consensus recommendations on incidental pulmonary nodules.`n"
-    r .= "Target Demographic: 35+ years without known cancer or immunosuppressive disorder.`n`n"
-    r .= "Detected nodules:`n"
-    for i, f in found {
-        typeName := f.type = "solid" ? "solid" : f.type = "subsolid" ? "ground glass/subsolid" : "part-solid"
-        r .= i ". " (f.sub6 ? "<6" : PE_Fmt(f.size)) " mm " typeName " nodule" (f.lobe != "" ? " (" f.lobe ")" : "") "`n"
-    }
+    r .= "Target Demographic: 35+ years without known cancer or immunosuppressive disorder.`n"
     recLow := PE_FleischnerRec(maxSolid, maxSub, maxPart, isMultiple, "Low risk")
     recHigh := PE_FleischnerRec(maxSolid, maxSub, maxPart, isMultiple, "High risk")
     for _, f in found {
@@ -586,10 +649,9 @@ PE_Fleischner(text) {
     r .= "`nLOW RISK recommendation:`n" recLow
     r .= "`n`nHIGH RISK recommendation:`n" recHigh
     if (SP_IncludeDatamining)
-        r .= "`n`nData Mining: " SP_DataminingPhrase " . ACR and AMA MIPS #364"
+        r .= "`n`n" SP_DataminingPhrase "`nACR and AMA MIPS #364"
     r .= "`n`nNote: The need for followup depends on clinical discussion of patient's comorbid conditions, demographics, and willingness to undergo followup imaging and potential intervention."
-    if (ShowCitations)
-        r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"
+    r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"     ; Fleischner reference always shown
     r .= "`n___________________________________________________________"
     summary := ""
     for _, f in found
@@ -706,10 +768,96 @@ PE_WordNum(w, words) {
 ; ================= THYROID: ACR TI-RADS =================
 PE_TIRADS(text) {
     t := RegExReplace(text, "\R", "`n")
+    t := StrReplace(t, Chr(0xD7), "x")
     if PE_RX(t, "i)(?:^|\n)\s*(?:CLINICAL\s+)?IMPRESSIONS?\s*:", im)
         t := SubStr(t, 1, im.Pos(0) - 1)
-    t := RegExReplace(t, "\s+", " ")
-    t := StrReplace(t, Chr(0xD7), "x")
+    ; Skip the report header and the TI-RADS legend ("TR3 = ... If >2.5cm, FNA")
+    if PE_RX(t, "i)(?:^|\n)\s*FINDINGS\s*:", fm)
+        t := SubStr(t, fm.Pos(0) + fm.Len(0))
+    if (RegExMatch(t, "im)^\s*Composition\s*:") && RegExMatch(t, "im)^\s*Echogenicity\s*:"))
+        nodules := PE_TIRADSFromTemplate(t)
+    else
+        nodules := PE_TIRADSFromText(t)
+    if (nodules.Length() = 0)
+        return PE_Fail("Could not find a thyroid nodule with a size.`n`nTemplate: fill in the nodule's Size, Composition, Echogenicity, Shape, Margins and Echogenic Foci.`nFree text example: Right lobe: solid, hypoechoic, 1.5 cm nodule with macrocalcifications, wider-than-tall with smooth margins.")
+    out := "`n`nACR TI-RADS:"
+    vals := [], fnaCount := 0, conf := 90
+    for i, n in nodules {
+        sc := PE_TIRADSScore(n.text)
+        tr := PE_TIRADSLevel(sc.total)
+        rec := PE_TIRADSRec(tr, n.size)
+        if InStr(rec, "FNA recommended")
+            fnaCount++
+        num := n.num != "" ? n.num : i
+        out .= "`nNodule " num (n.loc != "" ? ", " n.loc : "") ", " PE_Fmt(n.size) " cm: TR" tr " (" PE_TIRADSName(tr) "), "
+        out .= sc.total " point" (sc.total = 1 ? "" : "s") ". " rec
+        out .= "`n    Points: " sc.detail
+        vals.Push(["Nodule " num, (n.loc != "" ? n.loc " " : "") PE_Fmt(n.size) " cm, " sc.total " pts, TR" tr (sc.missing != "" ? "  [assumed: " sc.missing "]" : "")])
+        if (sc.missing != "")
+            conf := Min(conf, 70)
+    }
+    if (fnaCount > 2)
+        out .= "`nNote: If multiple nodules meet FNA criteria, sample the two highest-scoring nodules."
+    if (nodules.Length() > 4)
+        out .= "`nNote: Only the four highest-scoring nodules need to be reported."
+    if (ShowCitations)
+        out .= "`nRef: Tessler FN et al. ACR TI-RADS. JACR 2017;14:587-595."
+    return PE_Ok("ACR TI-RADS", vals, out, conf, true)
+}
+
+; Structured template: one block per nodule, starting at its "Location:" line.
+; Fields still showing their picklist ("composition choices:Cystic/Solid/...") are skipped.
+PE_TIRADSFromTemplate(t) {
+    nodules := [], cur := "", lastHdr := ""
+    for _, line in StrSplit(t, "`n") {
+        line := Trim(line, " `t`r")
+        if RegExMatch(line, "i)^Nodule\b(?!s)\s*(?:number|no\.?|#)?\s*(\d*)", h) {
+            lastHdr := h1
+            continue
+        }
+        if RegExMatch(line, "i)^Follow-?up\s+details") {
+            cur := ""
+            continue
+        }
+        if !RegExMatch(line, "i)^([A-Za-z \-]+?)\s*:\s*(.*)$", f)
+            continue
+        label := Format("{:L}", Trim(f1)), val := Trim(f2)
+        if (label = "location") {
+            cur := {num: lastHdr, loc: "", size: 0, text: "", fields: ""}
+            nodules.Push(cur)
+            lastHdr := ""
+            if !InStr(val, "/")
+                cur.loc := PE_ThyroidLoc(val)
+            continue
+        }
+        if !IsObject(cur)
+            continue
+        if (label = "size") {
+            v := RegExReplace(val, "i)\(?\s*previously.*$")     ; current size only
+            cur.size := PE_TIRADSSize(v)
+        } else if RegExMatch(label, "^(?:composition|echogenicity|shape|margins?|echogenic foci)$") {
+            if (val != "" && !InStr(val, "choices") && !InStr(val, "/"))
+                cur.text .= label ": " val ". "
+        }
+    }
+    out := []
+    for _, n in nodules
+        if (n.size > 0)
+            out.Push(n)
+    return out
+}
+
+; Free dictation: a nodule is a sentence with "nodule" and a size, plus the
+; sentences that follow it.
+PE_TIRADSFromText(t) {
+    keep := ""
+    for _, line in StrSplit(t, "`n") {
+        ; template count lines / legend: "nodules >/= 1 cm", "TR3 = 3 pts"
+        if RegExMatch(line, "i)>\s*/?\s*=|not\s+described\s+below|^\s*TR\d\s*=|estimated\s+total\s+number")
+            continue
+        keep .= line "`n"
+    }
+    t := RegExReplace(keep, "\s+", " ")
     t := RegExReplace(t, "(?<!\d)\.(?!\d)|;", ".`n")
     nodules := [], cur := ""
     for _, s in StrSplit(t, "`n") {
@@ -721,7 +869,7 @@ PE_TIRADS(text) {
         if (hasNod && sz > 0) {
             if RegExMatch(s, "i)\bno\s+(?:\w+\s+){0,3}nodules?\b")
                 continue
-            cur := {text: s, size: sz}
+            cur := {text: s, size: sz, num: "", loc: ""}
             nodules.Push(cur)
         } else if IsObject(cur) {
             if (RegExMatch(s, "i)\b(?:nodules?|lobe|isthmus)\b") && !RegExMatch(s, "i)\b(?:it|this|the\s+nodule|which|there\s+is)\b"))
@@ -730,27 +878,9 @@ PE_TIRADS(text) {
                 cur.text .= " " s
         }
     }
-    if (nodules.Length() = 0)
-        return PE_Fail("Could not find a thyroid nodule with a size.`n`nExample: Right lobe: solid, hypoechoic, 1.5 cm nodule with macrocalcifications, wider-than-tall with smooth margins.")
-    out := "`n`nACR TI-RADS:"
-    vals := [], fnaCount := 0, conf := 90
-    for i, n in nodules {
-        sc := PE_TIRADSScore(n.text)
-        tr := PE_TIRADSLevel(sc.total)
-        rec := PE_TIRADSRec(tr, n.size)
-        if InStr(rec, "FNA recommended")
-            fnaCount++
-        loc := PE_ThyroidLoc(n.text)
-        out .= "`nNodule " i (loc != "" ? " (" loc ")" : "") ", " PE_Fmt(n.size) " cm: " sc.detail
-        out .= " = " sc.total " point" (sc.total = 1 ? "" : "s") ", TR" tr " (" PE_TIRADSName(tr) "). " rec
-        vals.Push(["Nodule " i, (loc != "" ? loc " " : "") PE_Fmt(n.size) " cm, " sc.total " pts, TR" tr (sc.missing != "" ? "  [assumed: " sc.missing "]" : "")])
-        if (sc.missing != "")
-            conf := Min(conf, 70)
-    }
-    if (fnaCount > 2)
-        out .= "`nNote: ACR TI-RADS suggests FNA of no more than two nodules, those with the highest point totals."
-    out .= "`nRef: Tessler FN et al. ACR Thyroid Imaging, Reporting and Data System (TI-RADS). JACR 2017;14:587-595."
-    return PE_Ok("ACR TI-RADS", vals, out, conf, true)
+    for _, n in nodules
+        n.loc := PE_ThyroidLoc(n.text)
+    return nodules
 }
 
 PE_TIRADSSize(s) {
@@ -772,12 +902,13 @@ PE_TIRADSSize(s) {
 }
 
 PE_TIRADSScore(s) {
+    s := StrReplace(s, "&", " and ")
     t := RegExReplace(s, "i)\b(?:no|without|absent|negative\s+for)\s+(?:\w+[\s,]+){0,4}?(?:micro|macro)?calcifications?|\b(?:no|without)\s+(?:\w+\s+){0,3}?echogenic\s+foci", " ")
     t := RegExReplace(t, "i)\b(?:no|without)\s+(?:evidence\s+of\s+)?extra-?\s?thyroidal\s+extension", " ")
     t := RegExReplace(t, "i)\bnot\s+taller[- ]than[- ]wide", " wider-than-tall")
     missing := ""
     if RegExMatch(t, "i)spongiform")
-        return {total: 0, detail: "spongiform (0; other features not scored)", missing: ""}
+        return {total: 0, detail: "spongiform 0 (inherently benign; no further points added)", missing: ""}
     if RegExMatch(t, "i)mixed|partially\s+cystic|predominantly\s+(?:solid|cystic)|solid\s+and\s+cystic|cystic\s+and\s+solid|complex\s+cystic|cystic\s+(?:and|with)\s+solid|solid\s+(?:with|and)\s+cystic")
         comp := 1, cname := "mixed cystic and solid"
     else if (RegExMatch(t, "i)(?:purely|completely|entirely|almost\s+completely|simple)\s+cystic|\bcyst\b|anechoic\s+cyst|\bcystic\b") && !RegExMatch(t, "i)\bsolid\b"))
@@ -816,14 +947,14 @@ PE_TIRADSScore(s) {
     foci := 0, fnames := ""
     if RegExMatch(t, "i)microcalcification|punctate\s+(?:echogenic\s+foci|calcification)|psammoma")
         foci += 3, fnames .= "punctate echogenic foci (3) "
-    if RegExMatch(t, "i)peripheral\s+(?:rim\s+)?calcification|rim\s+calcification|eggshell|peripheral\s+calcific")
+    if RegExMatch(t, "i)peripheral\s+(?:rim\s+)?calcification|rim\s+calcification|eggshell|peripheral\s+calcific|peripheral\s+or\s+rim")
         foci += 2, fnames .= "peripheral calcifications (2) "
-    if RegExMatch(t, "i)macro-?\s?calcification|coarse\s+calcification|large\s+calcification")
+    if RegExMatch(t, "i)macro-?\s?calc|coarse\s+calcification|large\s+calcification")
         foci += 1, fnames .= "macrocalcifications (1) "
     if (fnames = "")
         fnames := RegExMatch(t, "i)comet[- ]tail") ? "comet-tail artifacts (0) " : "no echogenic foci (0) "
     total := comp + echo + shape + margin + foci
-    detail := cname " (" comp "), " ename " (" echo "), " sname " (" shape "), " mname " (" margin "), " Trim(fnames)
+    detail := cname " " comp " + " ename " " echo " + " sname " " shape " + " mname " " margin " + " RTrim(RegExReplace(Trim(fnames), "\((\d)\)\s*", "$1 + "), " +")
     return {total: total, detail: detail, missing: Trim(missing)}
 }
 
@@ -837,14 +968,14 @@ PE_TIRADSName(tr) {
 
 PE_TIRADSRec(tr, cm) {
     fna := [0, 0, 2.5, 1.5, 1.0], fu := [0, 0, 1.5, 1.0, 0.5]
-    when := ["", "", "ultrasound at 1, 3 and 5 years", "ultrasound at 1, 2, 3 and 5 years", "ultrasound annually for up to 5 years"]
+    when := ["", "", "at 1, 3 and 5 years", "at 1, 2, 3 and 5 years", "yearly for 5 years"]
     if (tr <= 2)
         return "No FNA."
     if (cm >= fna[tr])
-        return "FNA recommended (TR" tr " nodule " PE_Fmt(fna[tr]) " cm or larger)."
+        return "FNA recommended."
     if (cm >= fu[tr])
-        return "Follow-up " when[tr] " (TR" tr " nodule " PE_Fmt(fu[tr]) " cm or larger)."
-    return "No FNA or follow-up needed based on size."
+        return "No FNA. Follow-up ultrasound " when[tr] "."
+    return "No FNA or follow-up needed."
 }
 
 PE_ThyroidLoc(s) {
@@ -887,21 +1018,30 @@ PE_ORADS(text) {
         age := am[1] + 0
         meno := age < 45 ? "pre" : age >= 55 ? "post" : ""
     }
+    side := ""
+    if PE_RX(t, "i)\b(right|left)\s+(?:\w+\s+){0,3}?(?:ovar|adnex)", sm)
+        side := Format("{:T}", sm[1]) " "
+    else if PE_RX(t, "i)(?:ovar|adnex)\w*\s+(?:\w+\s+){0,3}?(?:on\s+the\s+)?(right|left)\b", sm)
+        side := Format("{:T}", sm[1]) " "
+    dx := {hemorrhagic: "compatible with a hemorrhagic cyst", endometrioma: "compatible with an endometrioma"
+        , dermoid: "compatible with a dermoid (mature cystic teratoma)"}
     if (cm >= 10) {
         cat := "O-RADS US 3 (low risk)"
-        rec := "Classic benign-appearing lesion 10 cm or larger: management by gynecologist; consider MRI (O-RADS MRI)."
-        res := "`n`nOvarian/adnexal cyst: " PE_Fmt(cm) " cm " type " cyst. " cat ". " rec
+        recTxt := "Classic benign-appearing lesion 10 cm or larger: management by gynecologist; consider MRI (O-RADS MRI)."
     } else {
         cat := (type = "simple" && cm <= 3 && meno != "post") ? "O-RADS US 1 (normal ovary, physiologic follicle)" : "O-RADS US 2 (almost certainly benign)"
-        if (meno = "")
-            rec := "Premenopausal: " PE_ORADSRec(type, cm, "pre") " Postmenopausal: " PE_ORADSRec(type, cm, "post")
-        else
-            rec := PE_ORADSRec(type, cm, meno)
         if (type = "simple" && cm <= 3 && meno = "")
             cat := "O-RADS US 1 if premenopausal (physiologic follicle), O-RADS US 2 if postmenopausal"
-        res := "`n`nOvarian/adnexal cyst: " PE_Fmt(cm) " cm " type " cyst" (meno != "" ? " in a " meno "menopausal patient" : "") ". " cat ". " rec
+        if (meno = "")
+            recTxt := "`n- If premenopausal: " PE_ORADSRec(type, cm, "pre") "`n- If postmenopausal: " PE_ORADSRec(type, cm, "post")
+        else
+            recTxt := "(" meno "menopausal): " PE_ORADSRec(type, cm, meno)
     }
-    res .= "`nRef: O-RADS US v2022 (ACR); follow-up per SRU consensus (Levine et al. Radiology 2010;256:943-954 and 2019;293:359-371)."
+    side1 := (side != "" ? side "ovarian" : "Ovarian") (type = "simple" ? " simple" : "")
+    res := "`n`n" side1 " cyst (" PE_Fmt(cm) " cm)" (type = "simple" ? "" : " " dx[type]) ". " cat "."
+    res .= "`nRecommendation" (SubStr(recTxt, 1, 1) = "(" ? " " recTxt : (SubStr(recTxt, 1, 1) = "`n" ? ":" recTxt : ": " recTxt))
+    if (ShowCitations)
+        res .= "`n`nRef: O-RADS US v2022 (ACR); follow-up per SRU consensus (Levine et al. Radiology 2010;256:943-954 and 2019;293:359-371)."
     vals := [["Size (largest)", PE_Fmt(cm) " cm"], ["Type", type], ["Menopausal status", meno = "" ? "not stated (both given)" : meno "menopausal"], ["Category", cat]]
     return PE_Ok("Ovarian Cyst (O-RADS / SRU)", vals, res, meno = "" ? 75 : 90, true)
 }
@@ -1131,7 +1271,7 @@ PE_ByName(name, text) {
 ; ============================================================
 
 ; Right-click menu entries (called from the host's CreateCustomMenu)
-SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false) {
+SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false, showLIRADS := false) {
     Menu, SPAsMenu, Add
     Menu, SPAsMenu, DeleteAll
     Menu, SPAsMenu, Add, Volume (prostate graded), SP_MenuItem
@@ -1152,6 +1292,15 @@ SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false
     Menu, %menuName%, Add, Smart Parse as..., :SPAsMenu
     if (showBoneAge)
         Menu, %menuName%, Add, Bone Age (Greulich && Pyle), SP_MenuBoneAge
+    if (showLIRADS) {
+        Menu, SPLiverMenu, Add
+        Menu, SPLiverMenu, DeleteAll
+        Menu, SPLiverMenu, Add, CT/MRI diagnostic (v2018), SP_MenuLIRADS
+        Menu, SPLiverMenu, Add, CEUS diagnostic (v2027), SP_MenuLIRADS
+        Menu, SPLiverMenu, Add, US surveillance (v2024), SP_MenuLIRADS
+        Menu, SPLiverMenu, Add, Treatment response (v2024), SP_MenuLIRADS
+        Menu, %menuName%, Add, Liver LI-RADS, :SPLiverMenu
+    }
 }
 
 SP_MenuItem(itemName := "", itemPos := "", menuName := "") {
@@ -1168,6 +1317,10 @@ SP_MenuItem(itemName := "", itemPos := "", menuName := "") {
 SP_MenuAuto(itemName := "", itemPos := "", menuName := "") {
     if (SP_ShowBoneAge && RegExMatch(g_SelectedText, "i)bone\s+age")) {
         SP_ShowBoneAgeGui(g_SelectedText)
+        return
+    }
+    if (SP_ShowLIRADS && RegExMatch(g_SelectedText, "i)LI-?RADS|\bAPHE\b|arterial\s+(?:phase\s+)?hyper-?enhanc|\bCEUS\b|\bLR-?TR\b|\bVIS-?\s?[ABC]\b")) {
+        SP_ShowLIRADSGui(g_SelectedText)
         return
     }
     if (g_SelectedText = "") {
@@ -1564,4 +1717,594 @@ SPBone_Close(GuiHwnd := 0) {
 }
 SPBone_Escape(GuiHwnd := 0) {
     SPB_Cancel()
+}
+
+; ================= LIVER: ACR LI-RADS =================
+; Modules (ACR LI-RADS site, Nov 2026): CT/MRI diagnostic v2018 | CEUS diagnostic v2027 |
+; US Surveillance v2024 | Treatment Response v2024 (CT/MRI nonradiation, CT/MRI radiation,
+; CEUS nonradiation). CT/MRI diagnostic table: untreated observation, high-risk patient.
+; PE_LIRADSExtract pre-fills the window from highlighted dictation; the
+; radiologist confirms every feature in the window before inserting.
+PE_LIRADSExtract(text) {
+    t := " " RegExReplace(StrReplace(text, Chr(0xD7), "x"), "\s+", " ") " "
+    ; "peripheral washout" (LR-M feature) vs nonperipheral washout (major feature)
+    t := RegExReplace(t, "i)(?<!non)(?<!non-)(?<!non )peripheral\s+wash-?\s?out", "PERIPHWO")
+    x := {}
+    x.rim := PE_LRHas(t, "(?<!non)(?<!non-)(?<!non )\brim\s+(?:arterial\s+(?:phase\s+)?)?(?:APHE|hyper-?enhanc)")
+    x.aphe := PE_LRHas(t, "\bnon-?\s?rim\s+(?:APHE|arterial|hyper)|\bAPHE\b|arterial(?:\s+phase)?\s+hyper-?enhanc|hyper-?enhanc\w*\s+(?:\w+\s+){0,2}arterial|arterially\s+(?:hyper-?)?enhanc|hypervascular")
+    if (x.rim && !PE_LRHas(t, "\bnon-?\s?rim"))
+        x.aphe := false
+    x.washout := PE_LRHas(t, "wash-?\s?out|de-?enhanc|hypo-?enhanc\w*\s+(?:\w+\s+){0,2}(?:portal|venous|delayed|transitional)")
+    x.capsule := PE_LRHas(t, "(?<!sub)(?<!Glisson)(?<!Glisson's )(?<!liver )(?<!hepatic )capsul")
+    x.growth := PE_LRHas(t, "threshold\s+growth")
+    x.tiv := PE_LRHas(t, "tumou?r\s+in\s+(?:the\s+)?vein|tumou?r\s+thromb|enhancing\s+(?:soft\s+tissue|thrombus)\s+(?:in|within|filling)\s+(?:the\s+)?(?:\w+\s+){0,3}vein|LR-?TIV")
+    x.lrm := x.rim || PE_LRHas(t, "targetoid|PERIPHWO|delayed\s+central\s+enhancement|\bLR-?M\b")
+    ; size: largest dimension in a sentence about the observation
+    mm := 0
+    for _, s in StrSplit(RegExReplace(t, "(?<!\d)\.(?!\d)|;", "`n"), "`n") {
+        if RegExMatch(s, "i)observation|lesion|nodule|mass|focus|\bLR-?\d|APHE|enhanc")
+            mm := Max(mm, PE_TIRADSSize(s) * 10)
+    }
+    x.mm := mm
+    return x
+}
+
+; True if the pattern occurs without "no / without / absent ..." just before it
+; (same clause: stops at . ; , boundaries).
+PE_LRHas(t, pat) {
+    pos := 1
+    while (p := RegExMatch(t, "i)" pat, m, pos)) {
+        pre := SubStr(t, Max(1, p - 45), Min(45, p - 1))
+        pre := RegExReplace(pre, "^.*[.;,]")
+        post := SubStr(t, p + StrLen(m), 40)
+        post := RegExReplace(post, "[.;,].*$")
+        negPre := RegExMatch(pre, "i)\b(?:no|without|absent|absence\s+of|negative\s+for|not|lacks?|lack\s+of)\b")
+        negPost := RegExMatch(post, "i)^\s*(?:is\s+|are\s+|was\s+)?(?:not\s+(?:seen|identified|present|demonstrated|evident)|absent)")
+        if (!negPre && !negPost)
+            return true
+        pos := p + Max(1, StrLen(m))
+    }
+    return false
+}
+
+; anc: 1 = none, 2 = favor malignancy, 3 = favor benignity
+; ovr: 1 = from features, 2 = LR-1, 3 = LR-2, 4 = LR-NC
+PE_LIRADSCalc(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr) {
+    r := {cat: "", base: "", note: ""}
+    if (ovr = 2)
+        r.cat := "LR-1"
+    else if (ovr = 3)
+        r.cat := "LR-2"
+    else if (ovr = 4)
+        r.cat := "LR-NC"
+    else if (tiv)
+        r.cat := "LR-TIV"
+    else if (lrm)
+        r.cat := "LR-M"
+    if (r.cat != "")
+        return r
+    if (mm <= 0)
+        return r
+    n := wo + cap + tg
+    if (!aphe)
+        c := (mm < 20) ? (n >= 2 ? 4 : 3) : (n = 0 ? 3 : 4)
+    else if (mm < 10)
+        c := (n = 0) ? 3 : 4
+    else if (mm < 20)
+        c := (n = 0) ? 3 : (n >= 2 || wo || tg) ? 5 : 4
+    else
+        c := (n = 0) ? 4 : 5
+    r.base := "LR-" c
+    if (anc = 2 && c < 4)
+        c += 1, r.note := "Ancillary features favor malignancy: upgraded from " r.base " (upgrade limited to LR-4)."
+    else if (anc = 2)
+        r.note := "Ancillary features favor malignancy (no upgrade above LR-4 / to LR-5)."
+    else if (anc = 3)
+        c -= 1, r.note := "Ancillary features favor benignity: downgraded from " r.base "."
+    r.cat := "LR-" c
+    return r
+}
+
+PE_LIRADSName(cat) {
+    static names := {"LR-1": "definitely benign", "LR-2": "probably benign", "LR-3": "intermediate probability of malignancy"
+        , "LR-4": "probably HCC", "LR-5": "definitely HCC", "LR-M": "probably or definitely malignant, not HCC specific"
+        , "LR-TIV": "tumor in vein", "LR-NC": "not categorizable"}
+    return names[cat]
+}
+
+PE_LIRADSMgmt(cat) {
+    static m := {"LR-NC": "Repeat or alternative diagnostic imaging in 3 months or less."
+        , "LR-1": "Return to surveillance in 6 months."
+        , "LR-2": "Return to surveillance in 6 months. Consider repeat diagnostic imaging in 6 months or less."
+        , "LR-3": "Repeat or alternative diagnostic imaging in 3-6 months."
+        , "LR-4": "Multidisciplinary discussion for tailored workup, which may include biopsy."
+        , "LR-5": "Multidisciplinary discussion for consensus management."
+        , "LR-M": "Multidisciplinary discussion for tailored workup, often including biopsy."
+        , "LR-TIV": "Multidisciplinary discussion for tailored workup, which may include biopsy."}
+    return m[cat]
+}
+
+PE_LIRADSText(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr) {
+    r := PE_LIRADSCalc(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr)
+    if (r.cat = "")
+        return ""
+    out := "`n`nLI-RADS (CT/MRI v2018): " r.cat ", " PE_LIRADSName(r.cat) "."
+    if (ovr = 1 && !tiv && !lrm) {
+        f := (aphe ? "nonrim APHE" : "no nonrim APHE")
+        if (wo)
+            f .= ", nonperipheral washout"
+        if (cap)
+            f .= ", enhancing capsule"
+        if (tg)
+            f .= ", threshold growth"
+        out .= "`nObservation: " PE_Fmt(mm) " mm; " f "."
+        if (r.note != "")
+            out .= "`n" r.note
+    }
+    out .= "`nRecommendation: " PE_LIRADSMgmt(r.cat)
+    if (ShowCitations)
+        out .= "`nRef: ACR CT/MRI LI-RADS v2018 Core."
+    return out
+}
+
+; ---------------- CEUS LI-RADS v2027 (diagnostic) ----------------
+; aphe: 1 none, 2 nonrim APHE, 3 rim APHE followed by washout of the rim (LR-M),
+;       4 rim APHE without rim washout, 5 peripheral discontinuous nodular (hemangioma)
+; wo:   1 none, 2 late (>=60 s) and mild [KCA: mild hypoenhancement 1-2 min or any 2-5 min],
+;       3 early (<60 s) washout, 4 marked washout / KCA hypoenhancement at <2 min
+PE_CEUSExtract(text) {
+    t := " " RegExReplace(StrReplace(text, Chr(0xD7), "x"), "\s+", " ") " "
+    x := {mm: 0, aphe: 1, wo: 1, agent: 1, tiv: false}
+    if RegExMatch(t, "i)sonazoid|perfluorobutane|kupffer")
+        x.agent := 2
+    sec := ""
+    if RegExMatch(t, "i)wash-?\s?out\D{0,30}?(\d+)\s*(?:s\b|sec)", m)
+        sec := m1
+    else if RegExMatch(t, "i)(\d+)\s*(?:s|sec\w*)\b\D{0,20}wash-?\s?out", m)
+        sec := m1
+    if PE_LRHas(t, "marked\s+(?:\w+\s+)?(?:wash-?\s?out|hypo-?enhanc)|punched[- ]out")
+        x.wo := 4
+    else if (PE_LRHas(t, "early\s+(?:\w+\s+)?wash-?\s?out") || (sec != "" && sec < 60))
+        x.wo := 3
+    else if PE_LRHas(t, "wash-?\s?out|hypo-?enhanc")
+        x.wo := 2
+    if PE_LRHas(t, "peripheral\s+(?:discontinuous\s+)?nodular|discontinuous\s+nodular")
+        x.aphe := 5
+    else if PE_LRHas(t, "(?<!non)(?<!non-)(?<!non )\brim\s+(?:arterial\s+(?:phase\s+)?)?(?:APHE|hyper-?enhanc|enhanc)")
+        x.aphe := (x.wo >= 2) ? 3 : 4
+    else if PE_LRHas(t, "\bAPHE\b|arterial(?:\s+phase)?\s+hyper-?enhanc|hyper-?enhanc\w*\s+(?:\w+\s+){0,2}arterial|arterially\s+(?:hyper-?)?enhanc")
+        x.aphe := 2
+    x.tiv := PE_LRHas(t, "tumou?r\s+in\s+(?:the\s+)?vein|tumou?r\s+thromb|LR-?TIV")
+    for _, s in StrSplit(RegExReplace(t, "(?<!\d)\.(?!\d)|;", "`n"), "`n")
+        if RegExMatch(s, "i)observation|lesion|nodule|mass|focus|\bLR-?\d|APHE|enhanc")
+            x.mm := Max(x.mm, PE_TIRADSSize(s) * 10)
+    return x
+}
+
+; anc: 1 none, 2 favor malignancy, 3 favor benignity; ovr: 1 features, 2 LR-1, 3 LR-2, 4 LR-NC
+PE_CEUSCalc(mm, aphe, wo, anc, tiv, ovr) {
+    r := {cat: "", base: "", note: ""}
+    if (ovr = 2)
+        r.cat := "LR-1"
+    else if (ovr = 3)
+        r.cat := "LR-2"
+    else if (ovr = 4)
+        r.cat := "LR-NC"
+    else if (tiv)
+        r.cat := "LR-TIV"
+    else if (aphe = 5)
+        r.cat := "LR-1", r.note := "Peripheral discontinuous nodular enhancement indicates hemangioma."
+    else if (aphe = 3)
+        r.cat := "LR-M", r.note := "Rim APHE followed by washout of rim-enhancing components."
+    else if (wo = 3)
+        r.cat := "LR-M", r.note := "Early (<60 s) washout."
+    else if (wo = 4)
+        r.cat := "LR-M", r.note := "Marked washout / hypoenhancement at <2 min."
+    if (r.cat != "" || mm <= 0)
+        return r
+    if (aphe = 4)
+        r.note := "Rim APHE without washout of the rim does not meet LR-M criteria (v2027); scored as no APHE."
+    hasAphe := (aphe = 2), hasWo := (wo = 2)
+    if (!hasAphe)
+        c := (hasWo && mm >= 20) ? 4 : 3
+    else if (mm < 10)
+        c := hasWo ? 4 : 3
+    else
+        c := hasWo ? 5 : 4
+    r.base := "LR-" c
+    if (anc = 2 && c < 4)
+        c += 1, r.note := Trim(r.note " Ancillary features favor malignancy: upgraded from " r.base " (limited to LR-4).")
+    else if (anc = 3 && c = 5)
+        r.note := Trim(r.note " Ancillary features favoring benignity cannot downgrade LR-5 (v2027).")
+    else if (anc = 3)
+        c -= 1, r.note := Trim(r.note " Ancillary features favor benignity: downgraded from " r.base ".")
+    r.cat := "LR-" c
+    return r
+}
+
+PE_CEUSMgmt(cat) {
+    static m := {"LR-NC": "Alternative diagnostic imaging (CT or MRI) in 3 months or less (preferred), or repeat CEUS in 3 months or less if a technique correction would allow diagnostic imaging."
+        , "LR-1": "Return to routine surveillance in 6 months."
+        , "LR-2": "Return to routine surveillance in 6 months, or alternative diagnostic imaging (CT or MRI) in 6 months or less."
+        , "LR-3": "Alternative diagnostic imaging (CT or MRI) in 3 months or less (preferred), or repeat CEUS in 3 months or less. Multidisciplinary discussion may be needed."
+        , "LR-4": "Multidisciplinary discussion may be needed for consensus management. If neither biopsy, CT/MRI, nor treatment is planned, repeat or alternative diagnostic imaging in 3 months or less."
+        , "LR-5": "Diagnostic of HCC. Multidisciplinary discussion for consensus management."
+        , "LR-M": "Multidisciplinary discussion for consensus management; often includes biopsy, alternative or repeat imaging, or treatment."
+        , "LR-TIV": "Multidisciplinary discussion for consensus management; may include biopsy or biomarker correlation to determine the etiology of the tumor in vein."}
+    return m[cat]
+}
+
+PE_CEUSText(mm, agent, aphe, wo, anc, tiv, ovr, adq) {
+    r := PE_CEUSCalc(mm, aphe, wo, anc, tiv, ovr)
+    if (r.cat = "")
+        return ""
+    name := (r.cat = "LR-M") ? "probably or definitely malignant, not necessarily HCC" : PE_LIRADSName(r.cat)
+    out := "`n`nCEUS LI-RADS (v2027): CEUS " r.cat ", " name "."
+    adqName := ["A (no or minimal limitations)", "B (moderate limitations)", "C (severe limitations)"]
+    if (ovr = 1 && !tiv) {
+        apheTxt := ["no APHE", "nonrim APHE", "rim APHE with washout of the rim", "rim APHE without rim washout", "peripheral discontinuous nodular enhancement"]
+        woTxt := (agent = 2) ? ["no hypoenhancement at 1-5 min", "mild hypoenhancement at 1-2 min or hypoenhancement at 2-5 min", "early (<60 s) washout", "marked hypoenhancement at <2 min"]
+                            : ["no washout", "late (60 s or later) and mild washout", "early (<60 s) washout", "marked washout at <2 min"]
+        out .= "`nNodule: " (mm > 0 ? PE_Fmt(mm) " mm; " : "") (agent = 2 ? "Kupffer-cell agent" : "blood-pool agent") "; " apheTxt[aphe] "; " woTxt[wo] "."
+    }
+    if (r.note != "")
+        out .= "`n" r.note
+    out .= "`nLI-RADS Adequacy Score: " adqName[adq] "."
+    if (adq = 3)
+        out .= " Imaging may need to be repeated; consider a different technique or modality."
+    out .= "`nRecommendation: " PE_CEUSMgmt(r.cat)
+    if (ShowCitations)
+        out .= "`nRef: ACR LI-RADS CEUS v2027 Core."
+    return out
+}
+
+; ---------------- US LI-RADS Surveillance v2024 ----------------
+; cat: 1 US-1, 2 US-2, 3 US-3; vis: 1 A, 2 B, 3 C
+PE_USExtract(text) {
+    x := {cat: 1, vis: 1, afp: false}
+    if RegExMatch(text, "i)\bUS-?\s?([123])\b", m)
+        x.cat := m1
+    else {
+        mm := PE_TIRADSSize(text) * 10
+        if (mm >= 10)
+            x.cat := 3
+        else if (mm > 0)
+            x.cat := 2
+    }
+    if RegExMatch(text, "i)\bVIS-?\s?([ABC])\b", m)
+        x.vis := InStr("ABC", m1)
+    if RegExMatch(text, "i)thrombus") && !RegExMatch(text, "i)\bno\s+(?:\w+\s+){0,3}thrombus")
+        x.cat := 3
+    return x
+}
+
+PE_USText(cat, vis, afp, risk) {
+    catTxt := ["US-1 Negative", "US-2 Subthreshold", "US-3 Positive"]
+    visTxt := ["VIS-A (no or minimal limitations)", "VIS-B (moderate limitations)", "VIS-C (severe limitations)"]
+    if (cat = 3)
+        rec := "Diagnostic multiphase contrast-enhanced CT or MRI, or CEUS."
+    else if (afp)
+        rec := "AFP positive without a US-3 observation: diagnostic multiphase MRI or CT (CEUS is unlikely to help without a US correlate)."
+    else if (vis = 3 && risk)
+        rec := "Consider an alternative surveillance modality (e.g., abbreviated MRI or multiphase CT); repeat VIS-C is likely."
+    else if (vis = 3)
+        rec := "Repeat US within 3 months. If still VIS-C, consider an alternative surveillance strategy (e.g., abbreviated MRI or multiphase CT)."
+    else if (cat = 2)
+        rec := "Repeat US in 3-6 months, up to two times. If the observation is no longer seen or remains under 10 mm, return to routine 6-month surveillance."
+    else
+        rec := "Repeat US in 6 months."
+    out := "`n`nLI-RADS US Surveillance (v2024): " catTxt[cat] ", " visTxt[vis] "."
+    out .= "`nRecommendation: " rec
+    if (ShowCitations)
+        out .= "`nRef: ACR LI-RADS US Surveillance v2024 Core."
+    return out
+}
+
+; ---------------- LI-RADS Treatment Response v2024 ----------------
+; tx: 1 CT/MRI nonradiation, 2 CT/MRI radiation, 3 CEUS nonradiation
+; mass (CT/MRI): 1 cannot assess, 2 none, 3 uncertain [rad: present, stable/decreased], 4 present [rad: new/increased]
+; intra/peri (CEUS): 1 absent, 2 uncertain, 3 present
+PE_TRACat(tx, mass, af, intra, peri, ne) {
+    if (tx = 3) {
+        if (ne)
+            return "Nonevaluable"
+        if (intra = 3 || peri = 3)
+            return "Viable"
+        if (intra = 2 || peri = 2)
+            return "Equivocal"
+        return "Nonviable"
+    }
+    if (mass = 1)
+        return "Nonevaluable"
+    if (mass = 2)
+        return "Nonviable"
+    if (mass = 4)
+        return "Viable"
+    if (af)
+        return "Viable"
+    return (tx = 2) ? "Nonprogressing" : "Equivocal"
+}
+
+PE_TRAText(tx, mass, af, intra, peri, ne, mm) {
+    cat := PE_TRACat(tx, mass, af, intra, peri, ne)
+    name := ["CT/MRI Nonradiation TRA v2024", "CT/MRI Radiation TRA v2024", "CEUS Nonradiation TRA v2024"]
+    if (cat = "Nonevaluable")
+        rec := "Repeat imaging in 3 months or less."
+    else if (cat = "Nonviable")
+        rec := "Continue monitoring in about 3 months."
+    else if (cat = "Viable")
+        rec := "Multidisciplinary discussion for consensus management, often including retreatment."
+    else if (tx = 3)
+        rec := "Continue monitoring in about 3 months. Multidisciplinary discussion for consensus management (often CT or MRI) if stable or increasing 6 months or more after treatment, or new in a previously nonviable lesion."
+    else
+        rec := "Continue monitoring in about 3 months; multidisciplinary discussion in unusual or complex cases."
+    out := "`n`nLI-RADS Treatment Response (" name[tx] "): LR-TR " cat "."
+    if (mm > 0 && cat != "Nonviable" && cat != "Nonevaluable")
+        out .= "`nMasslike enhancement measures " PE_Fmt(mm) " mm."
+    if (af && tx != 3 && (mass = 3))
+        out .= "`nUpgraded to LR-TR Viable by ancillary features (diffusion restriction or T2 hyperintensity" (tx = 2 ? ", new or increased" : "") ")."
+    out .= "`nRecommendation: " rec
+    if (ShowCitations)
+        out .= "`nRef: ACR LI-RADS " name[tx] " Core."
+    return out
+}
+
+PE_TRAExtract(text) {
+    x := {tx: 1}
+    if RegExMatch(text, "i)CEUS|contrast-enhanced\s+(?:ultrasound|US)|microbubble")
+        x.tx := 3
+    else if RegExMatch(text, "i)\bTARE\b|radioembol|Y-?90|yttrium|SBRT|stereotactic|radiation|proton")
+        x.tx := 2
+    return x
+}
+
+; Which LI-RADS module fits the highlighted text
+PE_LIRADSMode(text) {
+    if RegExMatch(text, "i)LR-?TR|treated\s+(?:lesion|observation)|post-?(?:treatment|ablation|TACE)|\bTACE\b|\bTARE\b|ablation|radioembol|Y-?90|SBRT|chemoemboli")
+        return "tra"
+    if RegExMatch(text, "i)\bCEUS\b|contrast-enhanced\s+(?:ultrasound|US)|microbubble|sonazoid|definity|lumason")
+        return "ceus"
+    if RegExMatch(text, "i)\bUS-?\s?[123]\b|\bVIS-?\s?[ABC]\b|surveillance\s+(?:ultrasound|US)")
+        return "us"
+    return "ctmr"
+}
+
+; ---------------- LI-RADS window (one window, four modules) ----------------
+SP_ShowLIRADSGui(prefill := "", mode := "") {
+    SP_Init()
+    prevGui := A_DefaultGui
+    if (mode = "")
+        mode := PE_LIRADSMode(prefill)
+    SP_LRMode := mode, SP_LRLastTx := 0
+    dark := DarkMode
+    bg := dark ? "1E1E1E" : "F0F0F0", fg := dark ? "E6E6E6" : "000000"
+    titles := {ctmr: "LI-RADS CT/MRI v2018 (diagnostic)", ceus: "CEUS LI-RADS v2027 (diagnostic)", us: "LI-RADS US Surveillance v2024", tra: "LI-RADS Treatment Response v2024"}
+    Gui, SPLR:New, +AlwaysOnTop -MinimizeBox +HwndhL +LabelSPLR_, % titles[mode]
+    Gui, SPLR:Color, %bg%, % dark ? "2D2D2D" : "FFFFFF"
+    Gui, SPLR:Font, s10 c%fg%, Segoe UI
+    Gui, SPLR:Add, Text, x10 y12 w90, Module:
+    modeMap := {ctmr: 1, ceus: 2, us: 3, tra: 4}
+    modeIdx := modeMap[mode]
+    Gui, SPLR:Add, DropDownList, x100 y9 w330 vSPL_Mode gSPL_ModeChange AltSubmit Choose%modeIdx%, CT/MRI diagnostic (v2018)|CEUS diagnostic (v2027)|US surveillance (v2024)|Treatment response (v2024)
+    SP_LRPrefill := prefill
+    if (mode = "ceus")
+        SP_LRBuildCEUS(prefill, fg)
+    else if (mode = "us")
+        SP_LRBuildUS(prefill, fg)
+    else if (mode = "tra")
+        SP_LRBuildTRA(prefill, fg)
+    else
+        SP_LRBuildCTMR(prefill, fg)
+    Gui, SPLR:Font, s10 c%fg%
+    Gui, SPLR:Add, Edit, x10 y+8 w420 r7 ReadOnly vSPL_Preview
+    Gui, SPLR:Add, Button, x10 y+10 w133 Default gSPL_Insert, Insert
+    Gui, SPLR:Add, Button, x+10 yp w133 gSPL_Copy, Copy
+    Gui, SPLR:Add, Button, x+10 yp w134 gSPL_Cancel, Cancel
+    SP_LRHwnd := hL
+    CoordMode, Mouse, Screen
+    MouseGetPos, mx, my
+    mx += 10, my += 10
+    Gui, SPLR:Show, x%mx% y%my% AutoSize
+    if (dark)
+        SP_DarkenGui(hL)
+    SP_FitOnMouseMonitor(hL)
+    SP_Front(hL)
+    SPL_Update()
+    Gui, %prevGui%:Default
+}
+
+SP_LRNote(fg, txt) {
+    Gui, SPLR:Font, s8 c808080
+    Gui, SPLR:Add, Text, x10 y+8 w420, %txt%
+    Gui, SPLR:Font, s10 c%fg%
+}
+SP_LRHead(fg, txt) {
+    Gui, SPLR:Font, s10 bold c%fg%
+    Gui, SPLR:Add, Text, x10 y+10 w420, %txt%
+    Gui, SPLR:Font, s10 norm c%fg%
+}
+
+SP_LRBuildCTMR(prefill, fg) {
+    x := PE_LIRADSExtract(prefill)
+    sz := x.mm > 0 ? PE_Fmt(x.mm) : ""
+    aphe := x.aphe ? 1 : 0, wo := x.washout ? 1 : 0, cap := x.capsule ? 1 : 0
+    tg := x.growth ? 1 : 0, tiv := x.tiv ? 1 : 0, lrm := x.lrm ? 1 : 0
+    Gui, SPLR:Add, Text, x10 y+12 w190, Observation size (mm):
+    Gui, SPLR:Add, Edit, x205 yp-3 w70 vSPL_Size gSPL_Update, %sz%
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPL_APHE gSPL_Update Checked%aphe%, Nonrim arterial phase hyperenhancement (APHE)
+    SP_LRHead(fg, "Additional major features")
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_WO gSPL_Update Checked%wo%, Nonperipheral washout
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_Cap gSPL_Update Checked%cap%, Enhancing capsule
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TG gSPL_Update Checked%tg%, Threshold growth (size up 50`% or more in 6 months or less)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Ancillary features:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Anc gSPL_Update AltSubmit Choose1, None / not applied|Favor malignancy (up 1, max LR-4)|Favor benignity (down 1)
+    SP_LRHead(fg, "These take precedence")
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TIV gSPL_Update Checked%tiv%, Tumor in vein (LR-TIV)
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 r2 vSPL_LRM gSPL_Update Checked%lrm%, LR-M features (targetoid, rim APHE, peripheral washout, delayed central enhancement)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Category:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Ovr gSPL_Update AltSubmit Choose1, From the features above|LR-1 Definitely benign|LR-2 Probably benign|LR-NC Cannot be categorized
+    SP_LRNote(fg, "Untreated observation, high-risk patient (cirrhosis, chronic hepatitis B, current or prior HCC). Pre-filled from the highlighted text: check every box before inserting.")
+}
+
+SP_LRBuildCEUS(prefill, fg) {
+    x := PE_CEUSExtract(prefill)
+    sz := x.mm > 0 ? PE_Fmt(x.mm) : ""
+    tiv := x.tiv ? 1 : 0
+    SP_LRCeusAgent := x.agent
+    Gui, SPLR:Add, Text, x10 y+12 w190, Nodule size (mm, B-mode):
+    Gui, SPLR:Add, Edit, x205 yp-3 w70 vSPC_Size gSPL_Update, %sz%
+    Gui, SPLR:Add, Text, x10 y+12 w140, Contrast agent:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPC_Agent gSPL_Update AltSubmit Choose" x.agent, Blood-pool agent (Lumason, Definity)|Kupffer-cell agent (Sonazoid)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Arterial phase:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPC_APHE gSPL_Update AltSubmit Choose" x.aphe, No APHE|Nonrim APHE|Rim APHE, then washout of the rim (LR-M)|Rim APHE, no washout of the rim|Peripheral discontinuous nodular (hemangioma)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Washout:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPC_WO gSPL_Update AltSubmit Choose" x.wo, % SP_LRWashItems(x.agent)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Ancillary features:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPC_Anc gSPL_Update AltSubmit Choose1, None / not applied|Favor malignancy (up 1, max LR-4)|Favor benignity (down 1, not from LR-5)
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPC_TIV gSPL_Update Checked%tiv%, Tumor in vein (CEUS LR-TIV)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Category:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPC_Ovr gSPL_Update AltSubmit Choose1, From the features above|LR-1 Definitely benign|LR-2 Probably benign|LR-NC Cannot be categorized
+    Gui, SPLR:Add, Text, x10 y+12 w140, Adequacy score:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPC_Adq gSPL_Update AltSubmit Choose1, A - No or minimal limitations|B - Moderate limitations|C - Severe limitations
+    SP_LRNote(fg, "Untreated nodule visible on B-mode US, high-risk patient. LR-M: rim APHE with rim washout, early (<60 s) washout, or marked washout at <2 min. Unsure about a feature: treat it as absent.")
+}
+
+SP_LRWashItems(agent) {
+    if (agent = 2)
+        return "No hypoenhancement at 1-5 min|Mild hypoenhancement at 1-2 min, or any at 2-5 min|Early washout (under 60 s) (LR-M)|Marked hypoenhancement within 2 min (LR-M)"
+    return "No washout|Late (60 s or later) and mild washout|Early washout (under 60 s) (LR-M)|Marked washout within 2 min (LR-M)"
+}
+
+SP_LRBuildUS(prefill, fg) {
+    x := PE_USExtract(prefill)
+    Gui, SPLR:Add, Text, x10 y+12 w140, US category:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPU_Cat gSPL_Update AltSubmit Choose" x.cat, US-1 Negative (none / definitely benign)|US-2 Subthreshold (under 10 mm)|US-3 Positive (10 mm+, distortion, new vein thrombus)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Visualization:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPU_Vis gSPL_Update AltSubmit Choose" x.vis, VIS-A No or minimal limitations|VIS-B Moderate limitations|VIS-C Severe limitations
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPU_AFP gSPL_Update, AFP positive (per referrer / AASLD definition)
+    Gui, SPLR:Add, Checkbox, x10 y+6 w420 r2 vSPU_Risk gSPL_Update, Risk factors for repeat VIS-C (MASH or alcohol cirrhosis, Child-Pugh B/C, BMI 35 or more)
+    SP_LRNote(fg, "Surveillance US in a patient at high risk for HCC. US-3 or AFP positive takes priority, then VIS-C, then US-2 / US-1.")
+}
+
+SP_LRBuildTRA(prefill, fg) {
+    x := PE_TRAExtract(prefill)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Treatment / exam:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPT_Tx gSPL_Update AltSubmit Choose" x.tx, CT/MRI after TACE, TAE, ablation or resection|CT/MRI after TARE (Y-90) or SBRT|CEUS after TACE, TAE, ablation or resection
+    SP_LRHead(fg, "CT / MRI")
+    Gui, SPLR:Add, Text, x20 y+4 w130, Masslike enhancement:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPT_Mass gSPL_Update AltSubmit Choose2, % SP_LRMassItems(x.tx)
+    Gui, SPLR:Add, Checkbox, x20 y+8 w410 r2 vSPT_AF gSPL_Update, % SP_LRAFText(x.tx)
+    SP_LRHead(fg, "CEUS")
+    Gui, SPLR:Add, Text, x20 y+4 w130, Intralesional:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPT_Intra gSPL_Update AltSubmit Choose1, Absent (no intralesional enhancement)|Uncertain|Present
+    Gui, SPLR:Add, Text, x20 y+10 w130, Perilesional:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPT_Peri gSPL_Update AltSubmit Choose1, Absent (enhances like liver)|Uncertain|Present (APHE with washout)
+    Gui, SPLR:Add, Checkbox, x20 y+8 w410 vSPT_NE gSPL_Update, Not evaluable (LR-TR Nonevaluable)
+    Gui, SPLR:Add, Text, x10 y+12 w200, Enhancing tissue size (mm, optional):
+    Gui, SPLR:Add, Edit, x215 yp-3 w70 vSPT_Size gSPL_Update
+    SP_LRNote(fg, "Per treated lesion. New or untreated observations outside the treatment zone: use the diagnostic module. Unsure between two categories: choose the less certain one.")
+}
+
+SP_LRMassItems(tx) {
+    if (tx = 2)
+        return "Cannot be assessed (degraded / omitted)|None|Present, stable or smaller over time|Present, new or larger over time"
+    return "Cannot be assessed (degraded / omitted)|None|Uncertain (presence or shape)|Present (any degree, any phase)"
+}
+SP_LRAFText(tx) {
+    if (tx = 2)
+        return "Ancillary: new or increasing diffusion restriction or mild-moderate T2 hyperintensity (Nonprogressing -> Viable)"
+    return "Ancillary: diffusion restriction or mild-moderate T2 hyperintensity where enhancement is uncertain (Equivocal -> Viable)"
+}
+
+SPL_ModeChange(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    Gui, SPLR:Submit, NoHide
+    modes := ["ctmr", "ceus", "us", "tra"]
+    if (modes[SPL_Mode] = SP_LRMode)
+        return
+    p := SP_LRPrefill
+    SPL_Cancel()
+    SP_ShowLIRADSGui(p, modes[SPL_Mode])
+}
+
+SPL_Update(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    if (!SP_LRHwnd)
+        return
+    Gui, SPLR:Submit, NoHide
+    if (SP_LRMode = "ceus") {
+        if (SPC_Agent != SP_LRCeusAgent) {          ; washout wording depends on the agent
+            SP_LRCeusAgent := SPC_Agent
+            GuiControl, SPLR:, SPC_WO, % "|" SP_LRWashItems(SPC_Agent)
+            GuiControl, SPLR:Choose, SPC_WO, % (SPC_WO >= 1 ? SPC_WO : 1)
+            Gui, SPLR:Submit, NoHide
+        }
+        mm := RegExReplace(SPC_Size, "[^\d.]"), mm := PE_IsNum(mm) ? mm + 0 : 0
+        SP_LRText := PE_CEUSText(mm, SPC_Agent, SPC_APHE, SPC_WO, SPC_Anc, SPC_TIV, SPC_Ovr, SPC_Adq)
+        hint := "Enter the nodule size (mm)."
+    } else if (SP_LRMode = "us") {
+        SP_LRText := PE_USText(SPU_Cat, SPU_Vis, SPU_AFP, SPU_Risk)
+        hint := ""
+    } else if (SP_LRMode = "tra") {
+        if (SPT_Tx != SP_LRLastTx) {
+            SP_LRLastTx := SPT_Tx
+            ct := (SPT_Tx != 3)
+            GuiControl, SPLR:, SPT_Mass, % "|" SP_LRMassItems(SPT_Tx)
+            GuiControl, SPLR:Choose, SPT_Mass, 2
+            GuiControl, SPLR:, SPT_AF, % SP_LRAFText(SPT_Tx)
+            for _, c in ["SPT_Mass", "SPT_AF"]
+                GuiControl, % "SPLR:" (ct ? "Enable" : "Disable"), %c%
+            for _, c in ["SPT_Intra", "SPT_Peri", "SPT_NE"]
+                GuiControl, % "SPLR:" (ct ? "Disable" : "Enable"), %c%
+            Gui, SPLR:Submit, NoHide
+        }
+        mm := RegExReplace(SPT_Size, "[^\d.]"), mm := PE_IsNum(mm) ? mm + 0 : 0
+        SP_LRText := PE_TRAText(SPT_Tx, SPT_Mass, SPT_AF, SPT_Intra, SPT_Peri, SPT_NE, mm)
+        hint := ""
+    } else {
+        mm := RegExReplace(SPL_Size, "[^\d.]"), mm := PE_IsNum(mm) ? mm + 0 : 0
+        SP_LRText := PE_LIRADSText(mm, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr)
+        hint := "Enter the observation size (mm)."
+    }
+    msg := SP_LRText != "" ? Trim(SP_LRText, "`n") : hint
+    GuiControl, SPLR:, SPL_Preview, %msg%
+}
+
+SPL_Insert(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    Critical
+    SPL_Update()
+    if (SP_LRText = "") {
+        MsgBox, 262192, LI-RADS, Enter the size first.
+        return
+    }
+    txt := SP_LRText
+    SP_ActivateTarget()
+    Gui, SPLR:Hide
+    if (SP_FleischnerAtEnd)
+        SP_InsertAtEnd(txt)
+    else
+        SP_InsertAfterSelection(txt)
+    SPL_Cancel()
+}
+
+SPL_Copy(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    SPL_Update()
+    if (SP_LRText = "")
+        return
+    Clipboard := Trim(SP_LRText, "`n")
+    SP_Tip("Copied to clipboard")
+}
+
+SPL_Cancel(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    Gui, SPLR:Destroy
+    SP_LRHwnd := 0
+}
+SPLR_Close(GuiHwnd := 0) {
+    SPL_Cancel()
+}
+SPLR_Escape(GuiHwnd := 0) {
+    SPL_Cancel()
+}
+
+SP_MenuLIRADS(itemName := "", itemPos := "", menuName := "") {
+    modes := {"CT/MRI diagnostic (v2018)": "ctmr", "CEUS diagnostic (v2027)": "ceus", "US surveillance (v2024)": "us", "Treatment response (v2024)": "tra"}
+    SP_ShowLIRADSGui(g_SelectedText, modes.HasKey(itemName) ? modes[itemName] : "")
 }

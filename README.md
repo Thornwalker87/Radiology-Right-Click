@@ -93,6 +93,7 @@ Auto-detect recognizes normal dictation, for example:
 | The proximal ICA residual lumen measures 1.2 mm and the normal distal cervical ICA measures 4.5 mm. | NASCET |
 | The SMA has a focal narrowing measuring 2 mm with a normal distal caliber of 6 mm. | Vessel stenosis % |
 | 45 HU on noncontrast, 85 HU on portal venous phase, and 50 HU on 15-minute delayed phase. | Adrenal washout |
+| Focal narrowing of the proximal ICA measuring 1.5 mm, with the distal ICA measuring 5 mm. | NASCET 70%. Also understood: "short / long segment narrowing ... luminal diameter measuring 2 mm and measuring 6 mm distally", "1.6 mm at the stenosis, 4.8 mm distally", "narrowed to 1.5 mm, compared to 5 mm in the distal segment", "from 6 mm to 2 mm", "post-stenotic diameter 0.7 cm". Velocities (cm/s), segment lengths ("over 4 cm") and segment names (M1, V4) are ignored; "2 x 1.5 mm" uses the narrowest. |
 | 7 mm solid noncalcified pulmonary nodule in the right upper lobe. | Fleischner 2017 (repeat mentions in the impression are not double-counted) |
 | Recommend follow-up ultrasound in 6 months. | Follow-up due date |
 | Right lobe: solid, hypoechoic, 1.5 cm nodule with macrocalcifications. | ACR TI-RADS points, TR level and FNA / follow-up per nodule (whole report OK; nodules repeated in the IMPRESSION are skipped; inserted after the IMPRESSION) |
@@ -103,6 +104,21 @@ Auto-detect recognizes normal dictation, for example:
 13.5, 13 1/2, 13 6/12, 13:6, 162 months); chronological age and sex are filled from the highlighted text
 or **Read report** (DOB + exam date, "Age: 12 years 3 months", "12-year-old girl", "8 yo M"). Inserts the
 standard paragraph with the G&P standard deviation for age/sex and whether the bone age is within 2 SD.
+
+**Liver LI-RADS, v1.22 only:** turn on in Preferences > Smart Parse (off by default). Right-click >
+Liver LI-RADS > pick a module, or Smart Parse on text mentioning LI-RADS / APHE / CEUS / LR-TR / VIS
+(the module is picked from the text; switch it with the Module list at the top of the window).
+Versions follow the ACR LI-RADS site (Nov 2026):
+- *CT/MRI diagnostic (v2018)*: size, nonrim APHE, nonperipheral washout, enhancing capsule, threshold
+  growth; ancillary up (max LR-4) / down; LR-TIV, LR-M, LR-1/2/NC.
+- *CEUS diagnostic (v2027)*: blood-pool or Kupffer-cell agent, APHE pattern, washout onset/degree;
+  LR-M = rim APHE followed by rim washout, early (<60 s) washout or marked washout at <2 min;
+  ancillary features cannot downgrade LR-5; LI-RADS Adequacy Score A/B/C.
+- *US surveillance (v2024)*: US-1/2/3 + VIS-A/B/C, AFP positive, VIS-C risk factors -> next step.
+- *Treatment response (v2024)*: CT/MRI nonradiation (Nonevaluable / Nonviable / Equivocal / Viable),
+  CT/MRI radiation incl. LR-TR Nonprogressing, CEUS nonradiation (intralesional x perilesional).
+The window pre-fills from the highlighted text and shows category + management live. Check every
+field, then Insert.
 
 **Dark theme:** Settings > Appearance > Dark theme.
 
@@ -145,8 +161,17 @@ run from OneDrive works), is **built into** `Radiology Right Click v1.22.ahk` an
 `Radiology Right Click v1.22-local.ahk`, so each script is a single self-contained file.
 (`QuickCall_v1.ahk` is the same code as a standalone script, if you want to run it on its own.)
 - Extract the ZIP first (don't run the script from inside the ZIP), then copy the v1.22 script to your OneDrive folder
-- Turn it on/off in **Right-click → Preferences → Quick Call Panel (Ctrl+Alt+P)**
+- Turn it on/off in **Right-click → Preferences → Quick Call → Show panel (Ctrl+Alt+P)**
   (on by default in v1.22; off by default in v1.22-local because it opens Google Voice links)
+- **Place calls from** (Preferences, or right-click any panel button):
+  - *This computer (Google Voice)*: call audio on the PC (dictaphone / headset). Quick Call presses
+    Google Voice's "Call" prompt for you.
+  - *My cell phone (Google Voice)*: Google Voice rings your cell first; answer it and the call connects.
+    Use this where the network blocks browser call audio (e.g. some VPNs). Needs **Always use my phone
+    to place calls** turned on in Google Voice > Settings > Calls; Quick Call offers to open that page
+    when you switch (and reminds you to turn it off when you switch back).
+  - *Microsoft Teams*: opens Teams with the number ready. Needs outside calling in Teams (a dial pad on
+    the Calls tab).
 - Phone book and panel position are saved next to the script (`QuickCall_PhoneBook.txt`,
   `QuickCall_Settings.ini`); the phone book is written via a temp file so a OneDrive sync lock can't wipe it
 - Don't run RadAssist with Quick Call enabled at the same time; both use Ctrl+Alt+P/D/L

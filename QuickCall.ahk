@@ -17,8 +17,11 @@ global QC_PopupHotkey    := "^!p"   ; Ctrl+Alt+P  show / minimize panel
 global QC_DialSelHotkey  := "^!d"   ; Ctrl+Alt+D  dial highlighted number
 global QC_LogHotkey      := "^!l"   ; Ctrl+Alt+L  paste critical-result statement
 global QC_OpenAtStart    := true    ; open the panel when the script starts
-global QC_DialMode       := "url"   ; "url" = voice.google.com link | "tel" = tel: link
+global QC_DialMode       := "url"   ; "url" = Google Voice | "teams" = Microsoft Teams | "tel" = tel: link
+                                    ; (also switchable from the Phone menu; the choice is saved)
 global QC_GVAccount      := 0       ; Google account index if signed into several
+global QC_AutoConfirm    := true    ; auto-press Call on Google Voice's "Call?" prompt
+global QC_ConfirmDelayMs := 1500    ; ms to let the Voice page load before confirming
 global QC_RadName        := "Dr. Harwood"
 global QC_IncludeReadBack := true
 
@@ -81,7 +84,7 @@ if (A_LineFile = A_ScriptFullPath) {
 
 ; ================= ENABLE / DISABLE =================
 QC_Init() {
-    global QC_Initialized, QC_X, QC_Y, QC_Expanded, QC_Collapsed, QC_W, QC_H
+    global QC_Initialized, QC_X, QC_Y, QC_Expanded, QC_Collapsed, QC_W, QC_H, QC_DialMode
     if QC_Initialized
         return
     QC_Initialized := true
@@ -92,6 +95,11 @@ QC_Init() {
     try QC_H := IniRead(QC_IniFile, "Panel", "H", "")
     try QC_Expanded := (IniRead(QC_IniFile, "Panel", "Expanded", "0") = "1")
     try QC_Collapsed := (IniRead(QC_IniFile, "Panel", "Collapsed", "0") = "1")
+    try {
+        dm := IniRead(QC_IniFile, "Settings", "DialMode", "")
+        if RegExMatch(dm, "^(url|teams|tel)$")
+            QC_DialMode := dm
+    }
 
     Hotkey(QC_PopupHotkey, QC_TogglePanel, "Off")
     Hotkey(QC_DialSelHotkey, QC_DialSelection, "Off")
@@ -170,6 +178,12 @@ QC_AddPhoneMenu(parentMenu) {
     pm.Add("Dial highlighted number", QC_DialSelection)
     pm.Add("Log last call to report", QC_LogCall)
     pm.Add("Edit phone numbers...", QC_ShowEditor)
+    pm.Add()
+    for m in [["url", "Call with Google Voice"], ["teams", "Call with Microsoft Teams"]] {
+        pm.Add(m[2], QC_SetDialMode.Bind(m[1]))
+        if (QC_DialMode = m[1])
+            pm.Check(m[2])
+    }
     parentMenu.Add("Phone", pm)
 }
 
@@ -545,6 +559,7 @@ QC_OnExit(*) {
 ; Keeps the panel above Sectra/PowerScribe and remembers the last non-browser window
 QC_Tick() {
     global QC_LastExtWin
+    static lastObs := 0, lastRaise := 0
     try {
         a := WinExist("A")
         if (a && WinGetPID(a) != QC_Pid) {
@@ -560,12 +575,21 @@ QC_Tick() {
             return
         if (WinGetPID("A") = QC_Pid)   ; one of our own windows or menus is active
             return
-        ; Re-assert topmost every tick (cheap, no flicker)
-        DllCall("SetWindowPos", "Ptr", h, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
+        ; Only touch the z-order when something is actually wrong: every
+        ; SetWindowPos repaints the title bar, which made the close X blink.
+        if !(WinGetExStyle(h) & 0x8)    ; lost WS_EX_TOPMOST
+            DllCall("SetWindowPos", "Ptr", h, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
         ; Sectra / PowerScribe windows that are themselves topmost can still sit
         ; above us; if anything covers the panel, bump it to the top of the band.
-        if QC_IsObscured(h)
+        ; If the same window is still on top right after a bump, it is winning the
+        ; topmost fight (or is an invisible overlay), so retry only every 10 s.
+        obs := QC_IsObscured(h)
+        if !obs {
+            lastObs := 0
+        } else if (obs != lastObs || A_TickCount - lastRaise > 10000) {
             QC_RaiseTop(h)
+            lastObs := obs, lastRaise := A_TickCount
+        }
     }
 }
 
@@ -605,7 +629,7 @@ QC_IsObscured(h) {
         } catch {
             continue
         }
-        return true
+        return root   ; the covering window (truthy)
     }
     return false
 }
@@ -821,10 +845,57 @@ QC_Dial(num, label := "") {
     }
     if (QC_DialMode = "tel")
         Run("tel:+1" d)
-    else
+    else if (QC_DialMode = "teams") {
+        ; Opens the Teams app with the number ready; falls back to Teams on the web
+        try Run("msteams:/l/call/0/0?users=4:%2B1" d)
+        catch
+            Run("https://teams.microsoft.com/l/call/0/0?users=4:%2B1" d)
+    } else {
         Run("https://voice.google.com/u/" QC_GVAccount "/calls?a=nc,%2B1" d)
+        if QC_AutoConfirm
+            SetTimer(QC_ConfirmCall, -250)
+    }
     QC_LastCall := {label: label != "" ? label : QC_FormatPhone(d), time: A_Now}
-    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d), 3000)
+    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : ""), 3000)
+}
+
+QC_SetDialMode(mode, *) {
+    global QC_DialMode
+    QC_DialMode := mode
+    try IniWrite(mode, QC_IniFile, "Settings", "DialMode")
+    QC_Tip("Quick Call now dials with " QC_DialModeName(mode), 2000)
+}
+QC_DialModeName(mode) {
+    return mode = "teams" ? "Microsoft Teams" : mode = "tel" ? "the phone app (tel:)" : "Google Voice"
+}
+
+; Google Voice opens a "Call this number?" prompt. Wait for the Voice tab to be
+; in front, give the page time to load, then press Enter to confirm. Only fires
+; while a browser window titled "...Voice..." is active, so it never types into
+; PowerScribe or Sectra.
+QC_ConfirmCall() {
+    static tries := 0, seenAt := 0
+    if (tries = 0)
+        seenAt := 0
+    tries++
+    onVoice := false
+    try {
+        a := WinExist("A")
+        onVoice := RegExMatch(WinGetProcessName(a), "i)^(chrome|msedge|firefox|brave)\.exe$")
+            && InStr(WinGetTitle(a), "Voice")
+    }
+    if (onVoice && !seenAt)
+        seenAt := A_TickCount
+    if (onVoice && A_TickCount - seenAt >= QC_ConfirmDelayMs) {
+        Send("{Enter}")
+        tries := 0
+        return
+    }
+    if (tries > 60) {          ; ~15 s: give up quietly
+        tries := 0
+        return
+    }
+    SetTimer(QC_ConfirmCall, -250)
 }
 
 QC_DialText(txt) {

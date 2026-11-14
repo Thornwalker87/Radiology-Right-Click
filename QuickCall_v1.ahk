@@ -20,6 +20,7 @@
 
 ; ================= SETTINGS (values are set in QC_Init) =================
 global QC_RadName, QC_IncludeReadBack, QC_OpenAtStart, QC_DialMode, QC_GVAccount
+global QC_AutoConfirm, QC_ConfirmDelayMs
 global QC_BookFile, QC_IniFile, QC_TickMs
 
 ; ================= STATE =================
@@ -54,8 +55,12 @@ QC_Init() {
 
     ; ---- user settings ----
     QC_OpenAtStart     := true      ; open the panel when the script starts
-    QC_DialMode        := "url"     ; "url" = voice.google.com link | "tel" = tel: link
+    QC_DialMode        := "url"     ; "url" = Google Voice on this computer | "cell" = Google Voice rings your cell
+                                    ; "teams" = Microsoft Teams | "tel" = tel: link
+                                    ; (also switchable by right-clicking a panel button; the choice is saved)
     QC_GVAccount       := 0         ; Google account index if signed into several
+    QC_AutoConfirm     := true      ; auto-press Call on Google Voice's "Call?" prompt
+    QC_ConfirmDelayMs  := 1500      ; ms to let the Voice page load before confirming
     QC_RadName         := "Dr. Harwood"
     QC_IncludeReadBack := true
     QC_TickMs          := 500       ; how often the panel checks it is still on top
@@ -77,6 +82,9 @@ QC_Init() {
     IniRead, QC_H, %QC_IniFile%, Panel, H, %A_Space%
     IniRead, col, %QC_IniFile%, Panel, Collapsed, 0
     QC_Collapsed := (col = "1")
+    IniRead, dm, %QC_IniFile%, Settings, DialMode, %A_Space%
+    if RegExMatch(dm, "^(url|cell|teams|tel)$")
+        QC_DialMode := dm
     QC_CW := 0, QC_CH := 0
     OnExit("QC_OnExit")
     OnMessage(0xA3, "QC_OnDblClick")      ; double-click title bar
@@ -601,6 +609,7 @@ QC_OnExit(ExitReason := "", ExitCode := "") {
 
 ; Keeps the panel above Sectra/PowerScribe and remembers the last non-browser window
 QC_Tick() {
+    static lastObs := 0, lastRaise := 0
     activePid := 0
     WinGet, a, ID, A
     if (a) {
@@ -617,12 +626,23 @@ QC_Tick() {
         return
     if (activePid = QC_Pid)    ; one of our own windows or menus is active
         return
-    ; Re-assert topmost every tick (cheap, no flicker). 0x13 = NOSIZE|NOMOVE|NOACTIVATE
-    DllCall("SetWindowPos", "Ptr", QC_PanelHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
+    ; Only touch the z-order when something is actually wrong: every
+    ; SetWindowPos repaints the title bar, which made the close X blink.
+    ; 0x13 = NOSIZE|NOMOVE|NOACTIVATE
+    WinGet, exStyle, ExStyle, ahk_id %QC_PanelHwnd%
+    if !(exStyle & 0x8)    ; lost WS_EX_TOPMOST
+        DllCall("SetWindowPos", "Ptr", QC_PanelHwnd, "Ptr", -1, "Int", 0, "Int", 0, "Int", 0, "Int", 0, "UInt", 0x13)
     ; Sectra / PowerScribe windows that are themselves topmost can still sit
     ; above us; if anything covers the panel, bump it to the top of the band.
-    if QC_IsObscured(QC_PanelHwnd)
+    ; If the same window is still on top right after a bump, it is winning the
+    ; topmost fight (or is an invisible overlay), so retry only every 10 s.
+    obs := QC_IsObscured(QC_PanelHwnd)
+    if (!obs) {
+        lastObs := 0
+    } else if (obs != lastObs || A_TickCount - lastRaise > 10000) {
         QC_RaiseTop(QC_PanelHwnd)
+        lastObs := obs, lastRaise := A_TickCount
+    }
 }
 
 ; Move the panel to the very top of the always-on-top band without activating it.
@@ -653,7 +673,7 @@ QC_IsObscured(h) {
         WinGetClass, cls, ahk_id %root%
         if RegExMatch(cls, shellCls)
             continue
-        return true
+        return root   ; the covering window (truthy)
     }
     return false
 }
@@ -675,6 +695,13 @@ QC_Panel_ContextMenu(GuiHwnd := 0, CtrlHwnd := 0, EventInfo := "", IsRightClick 
     Menu, QCCtx, Add, Rename..., QC_CtxRename
     Menu, QCCtx, Add
     Menu, QCCtx, Add, Open phone book editor..., QC_MenuEditor
+    Menu, QCCtx, Add
+    Menu, QCCtx, Add, Place calls from this computer (Google Voice), QC_CtxModeGV
+    Menu, QCCtx, Add, Place calls from my cell phone (Google Voice), QC_CtxModeCell
+    Menu, QCCtx, Add, Place calls with Microsoft Teams, QC_CtxModeTeams
+    Menu, QCCtx, % (QC_DialMode = "url" ? "Check" : "Uncheck"), Place calls from this computer (Google Voice)
+    Menu, QCCtx, % (QC_DialMode = "cell" ? "Check" : "Uncheck"), Place calls from my cell phone (Google Voice)
+    Menu, QCCtx, % (QC_DialMode = "teams" ? "Check" : "Uncheck"), Place calls with Microsoft Teams
     Menu, QCCtx, Show
 }
 QC_CtxEditNum(p1 := "", p2 := "", p3 := "") {
@@ -890,15 +917,101 @@ QC_Dial(num, label := "") {
     }
     if (QC_DialMode = "tel")
         url := "tel:+1" d
+    else if (QC_DialMode = "teams")
+        url := "msteams:/l/call/0/0?users=4:%2B1" d     ; Teams app, number ready to call
     else
         url := "https://voice.google.com/u/" QC_GVAccount "/calls?a=nc,%2B1" d
+    ok := true
     try Run, %url%
-    catch {
+    catch
+        ok := false
+    if (!ok && QC_DialMode = "teams") {    ; Teams app not registered: use Teams on the web
+        url := "https://teams.microsoft.com/l/call/0/0?users=4:%2B1" d
+        ok := true
+        try Run, %url%
+        catch
+            ok := false
+    }
+    if (!ok) {
         MsgBox, 262192, Quick Call, Could not open the dialer link. Is a default browser set?
         return
     }
+    if (QC_AutoConfirm && (QC_DialMode = "url" || QC_DialMode = "cell"))
+        SetTimer, QC_ConfirmCall, -250
     QC_LastCall := {label: (label != "" ? label : QC_FormatPhone(d)), time: A_Now}
-    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d), 3000)
+    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : QC_DialMode = "cell" ? "  - answer your cell" : ""), 3000)
+}
+
+; Works whether or not the panel has been initialised (Preferences calls these).
+QC_GetDialMode() {
+    if (QC_DialMode != "")
+        return QC_DialMode
+    IniRead, dm, %A_ScriptDir%\QuickCall_Settings.ini, Settings, DialMode, url
+    return RegExMatch(dm, "^(url|cell|teams|tel)$") ? dm : "url"
+}
+QC_DialModeName(mode) {
+    return mode = "cell" ? "your cell phone (Google Voice)" : mode = "teams" ? "Microsoft Teams"
+        : mode = "tel" ? "the phone app (tel:)" : "this computer (Google Voice)"
+}
+
+; Switching between computer and cell needs one Google Voice setting changed;
+; say exactly which one and offer to open the settings page.
+QC_SetDialMode(mode) {
+    old := QC_GetDialMode()
+    QC_DialMode := mode
+    ini := (QC_IniFile != "") ? QC_IniFile : A_ScriptDir "\QuickCall_Settings.ini"
+    IniWrite, %mode%, %ini%, Settings, DialMode
+    acct := (QC_GVAccount != "") ? QC_GVAccount : 0
+    msg := ""
+    if (mode = "cell" && old != "cell")
+        msg := "Quick Call will now place calls from your cell phone.`n`nGoogle Voice rings your cell first: answer it and the call connects. The call audio goes over the cell network, not this computer.`n`nOne-time setup: in Google Voice open Settings > Calls and turn ON ""Always use my phone to place calls"" (your cell must be listed as a linked number).`n`nOpen Google Voice settings now?"
+    else if (mode = "url" && old = "cell")
+        msg := "Quick Call will now place calls from this computer (dictaphone / headset).`n`nIn Google Voice open Settings > Calls and turn OFF ""Always use my phone to place calls"", or Google Voice will keep ringing your cell.`n`nOpen Google Voice settings now?"
+    if (msg != "") {
+        QC_DialogOpen++
+        MsgBox, 262180, Quick Call, %msg%
+        QC_DialogOpen--
+        IfMsgBox, Yes
+            Run, % "https://voice.google.com/u/" acct "/settings"
+        return
+    }
+    note := (mode = "teams") ? "`n(needs outside calling in Teams: a dial pad on the Calls tab)" : ""
+    QC_Tip("Quick Call now places calls from " QC_DialModeName(mode) note, 3000)
+}
+QC_CtxModeGV(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("url")
+}
+QC_CtxModeCell(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("cell")
+}
+QC_CtxModeTeams(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("teams")
+}
+
+; Google Voice opens a "Call this number?" prompt. Wait for the Voice tab to be
+; in front, give the page time to load, then press Enter to confirm. Only fires
+; while a browser window titled "...Voice..." is active, so it never types into
+; PowerScribe or Sectra.
+QC_ConfirmCall() {
+    static tries := 0, seenAt := 0
+    if (tries = 0)
+        seenAt := 0
+    tries++
+    WinGet, proc, ProcessName, A
+    WinGetTitle, title, A
+    onVoice := RegExMatch(proc, "i)^(chrome|msedge|firefox|brave)\.exe$") && InStr(title, "Voice")
+    if (onVoice && !seenAt)
+        seenAt := A_TickCount
+    if (onVoice && A_TickCount - seenAt >= QC_ConfirmDelayMs) {
+        Send, {Enter}
+        tries := 0
+        return
+    }
+    if (tries > 60) {          ; ~15 s: give up quietly
+        tries := 0
+        return
+    }
+    SetTimer, QC_ConfirmCall, -250
 }
 
 QC_DialText(txt) {
