@@ -93,6 +93,7 @@ Auto-detect recognizes normal dictation, for example:
 | The proximal ICA residual lumen measures 1.2 mm and the normal distal cervical ICA measures 4.5 mm. | NASCET |
 | The SMA has a focal narrowing measuring 2 mm with a normal distal caliber of 6 mm. | Vessel stenosis % |
 | 45 HU on noncontrast, 85 HU on portal venous phase, and 50 HU on 15-minute delayed phase. | Adrenal washout |
+| Focal narrowing of the proximal ICA measuring 1.5 mm, with the distal ICA measuring 5 mm. | NASCET 70%. Also understood: "short / long segment narrowing ... luminal diameter measuring 2 mm and measuring 6 mm distally", "1.6 mm at the stenosis, 4.8 mm distally", "narrowed to 1.5 mm, compared to 5 mm in the distal segment", "from 6 mm to 2 mm", "post-stenotic diameter 0.7 cm". Velocities (cm/s), segment lengths ("over 4 cm") and segment names (M1, V4) are ignored; "2 x 1.5 mm" uses the narrowest. |
 | 7 mm solid noncalcified pulmonary nodule in the right upper lobe. | Fleischner 2017 (repeat mentions in the impression are not double-counted) |
 | Recommend follow-up ultrasound in 6 months. | Follow-up due date |
 | Right lobe: solid, hypoechoic, 1.5 cm nodule with macrocalcifications. | ACR TI-RADS points, TR level and FNA / follow-up per nodule (whole report OK; nodules repeated in the IMPRESSION are skipped; inserted after the IMPRESSION) |

@@ -5897,13 +5897,50 @@ PE_RVLVInterp(ratio) {
 }
 
 ; ================= STENOSIS / NASCET =================
+; Remove numbers that are not vessel diameters before the stenosis parse:
+; velocities (250 cm/s), segment lengths (over 4 cm, 1.5 cm segment), "2 x 1.5 mm" -> 1.5 mm,
+; segment names (M1, A2, P1, C4, V4).
+PE_StenPrep(t) {
+    static words := ["one", "two", "three", "four", "five", "six", "seven"]
+    n := PE_N(), u := PE_U()
+    t := RegExReplace(t, "i)" n "\s*(?:cm|mm|m)\s*(?:/|per\s+)\s*(?:s|sec(?:ond)?)\b", "")
+    t := RegExReplace(t, "i)\b(?:over|spanning|extending\s+(?:over|for)|for|length\s+of|along)\s+(?:a\s+|an\s+|approximately\s+|about\s+)?" n "\s*" u "(?:\s+(?:segment|length|distance))?", "")
+    t := RegExReplace(t, "i)" n "\s*-?\s*" u "\s*(?:-?\s*long\b|in\s+length|(?:long\s+)?segment\b|length\b)", "")
+    while PE_RX(t, "i)" n "\s*" u "?\s*(?:x|by)\s*" n "\s*" u, m) {
+        v := Min(m[1] + 0, m[3] + 0), un := (m[2] != "") ? m[2] : m[4]
+        t := SubStr(t, 1, m.Pos(0) - 1) PE_Fmt(v, 2) " " un SubStr(t, m.Pos(0) + m.Len(0))
+    }
+    while PE_RX(t, "\b([MAPCV])([1-7])\b", m)
+        t := SubStr(t, 1, m.Pos(0) - 1) m[1] "-" words[m[2] + 0] SubStr(t, m.Pos(0) + m.Len(0))
+    return t
+}
+
 PE_Stenosis(text, forceNascet := false) {
-    t := PE_Clean(text)
-    stenRe := "(?:residual\s+(?:lumen|luminal\s+diameter|diameter)|minimal\s+lumen(?:al)?(?:\s+diameter)?|\bMLD\b|narrowest|tightest|narrowing|narrowed|stenos[ie]s|stenotic|lumen\s+at\s+the\s+(?:stenosis|narrowing))"
-    normRe := "(?:\bnormal|\breference|\bdistal|non-?stenotic|unaffected|uninvolved|beyond\s+the\s+(?:stenosis|narrowing)|downstream)"
-    sten := PE_ValueAfter(t, stenRe, normRe)
-    norm := PE_ValueAfter(t, normRe, stenRe)
-    conf := 90
+    t := PE_StenPrep(PE_Clean(text))
+    stenRe := "(?:residual\s+(?:lumen|luminal\s+diameter|diameter)|minimal\s+lumen(?:al)?(?:\s+diameter)?|\bMLD\b|narrowest|tightest|narrowing|narrowed|stenos[ie]s|(?<!post-)(?<!post)stenotic|lumen\s+at\s+the\s+(?:stenosis|narrowing))"
+    normRe := "(?:\bnormal|\breference|\bdistal|non-?stenotic|unaffected|uninvolved|beyond\s+the\s+(?:stenosis|narrowing)|downstream|post-?stenotic)"
+    conf := 90, sten := "", norm := ""
+    ; "narrowing from 6 mm to 2 mm"
+    if PE_RX(t, "i)\bfrom\s+" PE_N() "\s*" PE_U() "?(?:\s+\w+){0,3}?\s+to\s+" PE_N() "\s*" PE_U() "?", fm) {
+        a := {val: fm[1] + 0, unit: PE_Unit(fm[2])}, b := {val: fm[3] + 0, unit: PE_Unit(fm[4])}
+        ua := (a.unit != "") ? a.unit : b.unit, ub := (b.unit != "") ? b.unit : a.unit
+        if (PE_ToMm(a.val, ua) > PE_ToMm(b.val, ub))
+            norm := a, sten := b
+        else
+            norm := b, sten := a
+    }
+    if !IsObject(sten) {
+        sten := PE_ValueAfter(t, stenRe, normRe)
+        norm := PE_ValueAfter(t, normRe, stenRe)
+        ; "1.6 mm at the stenosis", "2 mm of residual lumen" (number before the word)
+        if PE_RX(t, "i)" PE_N() "\s*-?\s*" PE_U() "?\s+(?:of\s+)?(?:(?:at|in)\s+(?:the\s+)?(?:site\s+of\s+(?:the\s+)?)?)?(?:stenosis|narrowing|narrowest|tightest|residual\s+lumen)", m)
+            sten := {val: m[1] + 0, unit: PE_Unit(m[2])}
+        ; "measuring 6 mm distally", "5 mm beyond the stenosis", "5 mm in the more distal vessel"
+        if PE_RX(t, "i)" PE_N() "\s*-?\s*" PE_U() "?(?:\s+(?:in\s+)?(?:the\s+)?(?:more\s+)?(?:\w+\s+){0,2}?)?(?:distally|downstream|beyond\s+the\s+(?:stenosis|narrowing)|in\s+the\s+(?:more\s+)?distal\s+\w+)", m) {
+            if (!IsObject(norm) || (IsObject(sten) && norm.val = sten.val && norm.unit = sten.unit))
+                norm := {val: m[1] + 0, unit: PE_Unit(m[2])}
+        }
+    }
     if (!IsObject(sten) && PE_RX(t, "i)" PE_N() "\s*-?\s*" PE_U() "?\s+(?:residual\s+lumen|stenosis|narrowing)", m))
         sten := {val: m[1] + 0, unit: PE_Unit(m[2])}
     if (!IsObject(sten) || !IsObject(norm) || (sten.val = norm.val && sten.unit = norm.unit)) {
@@ -5916,7 +5953,7 @@ PE_Stenosis(text, forceNascet := false) {
                 sten := b, norm := a
             conf := 60
         } else {
-            return PE_Fail("Could not find a stenosis measurement and a normal (reference) measurement.`n`nExamples:`n- The proximal ICA residual lumen measures 1.2 mm and the normal distal cervical ICA measures 4.5 mm.`n- The SMA has a focal narrowing measuring 2 mm with a normal distal caliber of 6 mm.")
+            return PE_Fail("Could not find a stenosis measurement and a normal (reference) measurement.`n`nExamples:`n- The proximal ICA residual lumen measures 1.2 mm and the normal distal cervical ICA measures 4.5 mm.`n- The SMA has a focal narrowing measuring 2 mm with a normal distal caliber of 6 mm.`n- Short segment narrowing with luminal diameter measuring 2 mm and measuring 6 mm distally.`n- Narrowing of the left renal artery from 5 mm to 2 mm.")
         }
     }
     sU := sten.unit != "" ? sten.unit : ((norm.unit = "cm" && sten.val < 2) ? "cm" : "mm")
