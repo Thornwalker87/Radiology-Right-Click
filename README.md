@@ -104,11 +104,20 @@ Auto-detect recognizes normal dictation, for example:
 or **Read report** (DOB + exam date, "Age: 12 years 3 months", "12-year-old girl", "8 yo M"). Inserts the
 standard paragraph with the G&P standard deviation for age/sex and whether the bone age is within 2 SD.
 
-**Liver LI-RADS (CT/MRI v2018), v1.22 only:** turn on in Preferences > Smart Parse (off by default).
-Right-click > Liver LI-RADS (CT/MRI), or Smart Parse on text mentioning LI-RADS / APHE / arterial phase
-hyperenhancement. A window pre-filled from the highlighted text (size, nonrim APHE, nonperipheral washout,
-enhancing capsule, threshold growth, tumor in vein, LR-M features) shows the category and management live;
-ancillary features can upgrade (max LR-4) or downgrade by one. Check every box, then Insert.
+**Liver LI-RADS, v1.22 only:** turn on in Preferences > Smart Parse (off by default). Right-click >
+Liver LI-RADS > pick a module, or Smart Parse on text mentioning LI-RADS / APHE / CEUS / LR-TR / VIS
+(the module is picked from the text; switch it with the Module list at the top of the window).
+Versions follow the ACR LI-RADS site (Nov 2026):
+- *CT/MRI diagnostic (v2018)*: size, nonrim APHE, nonperipheral washout, enhancing capsule, threshold
+  growth; ancillary up (max LR-4) / down; LR-TIV, LR-M, LR-1/2/NC.
+- *CEUS diagnostic (v2027)*: blood-pool or Kupffer-cell agent, APHE pattern, washout onset/degree;
+  LR-M = rim APHE followed by rim washout, early (<60 s) washout or marked washout at <2 min;
+  ancillary features cannot downgrade LR-5; LI-RADS Adequacy Score A/B/C.
+- *US surveillance (v2024)*: US-1/2/3 + VIS-A/B/C, AFP positive, VIS-C risk factors -> next step.
+- *Treatment response (v2024)*: CT/MRI nonradiation (Nonevaluable / Nonviable / Equivocal / Viable),
+  CT/MRI radiation incl. LR-TR Nonprogressing, CEUS nonradiation (intralesional x perilesional).
+The window pre-fills from the highlighted text and shows category + management live. Check every
+field, then Insert.
 
 **Dark theme:** Settings > Appearance > Dark theme.
 

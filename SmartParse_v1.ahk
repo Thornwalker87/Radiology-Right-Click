@@ -6,7 +6,8 @@
 ; Highlight dictated text -> right-click -> Smart Parse (Auto-detect) or Smart Parse as...
 ;   Volume (prostate graded), ICH ABC/2, RV/LV, NASCET / any-vessel stenosis,
 ;   adrenal washout, Fleischner 2017, follow-up date, ACR TI-RADS, ovarian cyst
-;   (O-RADS US + SRU), Bone age (Greulich & Pyle) window, LI-RADS CT/MRI v2018 window.
+;   (O-RADS US + SRU), Bone age (Greulich & Pyle) window, LI-RADS window (CT/MRI v2018,
+;   CEUS v2027, US Surveillance v2024, Treatment Response v2024).
 ; Every PE_* function is pure (text in, result object out) so it can be tested
 ; without any GUI. Results: {ok, title, values: [[label, value], ...], text, conf,
 ; atImpression} or {ok: false, err}.
@@ -22,6 +23,10 @@ global SP_Initialized, SP_Pid
 global SP_ShowParse, SP_ShowTIRADS, SP_ShowORADS, SP_ShowBoneAge     ; set by the host (Preferences)
 global SP_ShowLIRADS                                                  ; set by the host (Preferences, off by default)
 global SP_LRHwnd, SP_LRText, SPL_Size, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr, SPL_Preview   ; LI-RADS GUI
+global SP_LRMode, SP_LRPrefill, SP_LRCeusAgent, SP_LRLastTx, SPL_Mode
+global SPC_Size, SPC_Agent, SPC_APHE, SPC_WO, SPC_Anc, SPC_TIV, SPC_Ovr, SPC_Adq      ; CEUS LI-RADS controls
+global SPU_Cat, SPU_Vis, SPU_AFP, SPU_Risk                                          ; US surveillance controls
+global SPT_Tx, SPT_Mass, SPT_AF, SPT_Intra, SPT_Peri, SPT_NE, SPT_Size               ; treatment response controls
 
 SP_Init() {
     if (SP_Initialized)
@@ -1223,8 +1228,15 @@ SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false
     Menu, %menuName%, Add, Smart Parse as..., :SPAsMenu
     if (showBoneAge)
         Menu, %menuName%, Add, Bone Age (Greulich && Pyle), SP_MenuBoneAge
-    if (showLIRADS)
-        Menu, %menuName%, Add, Liver LI-RADS (CT/MRI), SP_MenuLIRADS
+    if (showLIRADS) {
+        Menu, SPLiverMenu, Add
+        Menu, SPLiverMenu, DeleteAll
+        Menu, SPLiverMenu, Add, CT/MRI diagnostic (v2018), SP_MenuLIRADS
+        Menu, SPLiverMenu, Add, CEUS diagnostic (v2027), SP_MenuLIRADS
+        Menu, SPLiverMenu, Add, US surveillance (v2024), SP_MenuLIRADS
+        Menu, SPLiverMenu, Add, Treatment response (v2024), SP_MenuLIRADS
+        Menu, %menuName%, Add, Liver LI-RADS, :SPLiverMenu
+    }
 }
 
 SP_MenuItem(itemName := "", itemPos := "", menuName := "") {
@@ -1243,7 +1255,7 @@ SP_MenuAuto(itemName := "", itemPos := "", menuName := "") {
         SP_ShowBoneAgeGui(g_SelectedText)
         return
     }
-    if (SP_ShowLIRADS && RegExMatch(g_SelectedText, "i)LI-?RADS|\bAPHE\b|arterial\s+(?:phase\s+)?hyper-?enhanc")) {
+    if (SP_ShowLIRADS && RegExMatch(g_SelectedText, "i)LI-?RADS|\bAPHE\b|arterial\s+(?:phase\s+)?hyper-?enhanc|\bCEUS\b|\bLR-?TR\b|\bVIS-?\s?[ABC]\b")) {
         SP_ShowLIRADSGui(g_SelectedText)
         return
     }
@@ -1643,8 +1655,10 @@ SPBone_Escape(GuiHwnd := 0) {
     SPB_Cancel()
 }
 
-; ================= LIVER: ACR LI-RADS CT/MRI v2018 =================
-; Diagnostic table for an untreated observation in a high-risk patient.
+; ================= LIVER: ACR LI-RADS =================
+; Modules (ACR LI-RADS site, Nov 2026): CT/MRI diagnostic v2018 | CEUS diagnostic v2027 |
+; US Surveillance v2024 | Treatment Response v2024 (CT/MRI nonradiation, CT/MRI radiation,
+; CEUS nonradiation). CT/MRI diagnostic table: untreated observation, high-risk patient.
 ; PE_LIRADSExtract pre-fills the window from highlighted dictation; the
 ; radiologist confirms every feature in the window before inserting.
 PE_LIRADSExtract(text) {
@@ -1769,41 +1783,256 @@ PE_LIRADSText(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr) {
     return out
 }
 
-; ---------------- LI-RADS window ----------------
-SP_ShowLIRADSGui(prefill := "") {
+; ---------------- CEUS LI-RADS v2027 (diagnostic) ----------------
+; aphe: 1 none, 2 nonrim APHE, 3 rim APHE followed by washout of the rim (LR-M),
+;       4 rim APHE without rim washout, 5 peripheral discontinuous nodular (hemangioma)
+; wo:   1 none, 2 late (>=60 s) and mild [KCA: mild hypoenhancement 1-2 min or any 2-5 min],
+;       3 early (<60 s) washout, 4 marked washout / KCA hypoenhancement at <2 min
+PE_CEUSExtract(text) {
+    t := " " RegExReplace(StrReplace(text, Chr(0xD7), "x"), "\s+", " ") " "
+    x := {mm: 0, aphe: 1, wo: 1, agent: 1, tiv: false}
+    if RegExMatch(t, "i)sonazoid|perfluorobutane|kupffer")
+        x.agent := 2
+    sec := ""
+    if RegExMatch(t, "i)wash-?\s?out\D{0,30}?(\d+)\s*(?:s\b|sec)", m)
+        sec := m1
+    else if RegExMatch(t, "i)(\d+)\s*(?:s|sec\w*)\b\D{0,20}wash-?\s?out", m)
+        sec := m1
+    if PE_LRHas(t, "marked\s+(?:\w+\s+)?(?:wash-?\s?out|hypo-?enhanc)|punched[- ]out")
+        x.wo := 4
+    else if (PE_LRHas(t, "early\s+(?:\w+\s+)?wash-?\s?out") || (sec != "" && sec < 60))
+        x.wo := 3
+    else if PE_LRHas(t, "wash-?\s?out|hypo-?enhanc")
+        x.wo := 2
+    if PE_LRHas(t, "peripheral\s+(?:discontinuous\s+)?nodular|discontinuous\s+nodular")
+        x.aphe := 5
+    else if PE_LRHas(t, "(?<!non)(?<!non-)(?<!non )\brim\s+(?:arterial\s+(?:phase\s+)?)?(?:APHE|hyper-?enhanc|enhanc)")
+        x.aphe := (x.wo >= 2) ? 3 : 4
+    else if PE_LRHas(t, "\bAPHE\b|arterial(?:\s+phase)?\s+hyper-?enhanc|hyper-?enhanc\w*\s+(?:\w+\s+){0,2}arterial|arterially\s+(?:hyper-?)?enhanc")
+        x.aphe := 2
+    x.tiv := PE_LRHas(t, "tumou?r\s+in\s+(?:the\s+)?vein|tumou?r\s+thromb|LR-?TIV")
+    for _, s in StrSplit(RegExReplace(t, "(?<!\d)\.(?!\d)|;", "`n"), "`n")
+        if RegExMatch(s, "i)observation|lesion|nodule|mass|focus|\bLR-?\d|APHE|enhanc")
+            x.mm := Max(x.mm, PE_TIRADSSize(s) * 10)
+    return x
+}
+
+; anc: 1 none, 2 favor malignancy, 3 favor benignity; ovr: 1 features, 2 LR-1, 3 LR-2, 4 LR-NC
+PE_CEUSCalc(mm, aphe, wo, anc, tiv, ovr) {
+    r := {cat: "", base: "", note: ""}
+    if (ovr = 2)
+        r.cat := "LR-1"
+    else if (ovr = 3)
+        r.cat := "LR-2"
+    else if (ovr = 4)
+        r.cat := "LR-NC"
+    else if (tiv)
+        r.cat := "LR-TIV"
+    else if (aphe = 5)
+        r.cat := "LR-1", r.note := "Peripheral discontinuous nodular enhancement indicates hemangioma."
+    else if (aphe = 3)
+        r.cat := "LR-M", r.note := "Rim APHE followed by washout of rim-enhancing components."
+    else if (wo = 3)
+        r.cat := "LR-M", r.note := "Early (<60 s) washout."
+    else if (wo = 4)
+        r.cat := "LR-M", r.note := "Marked washout / hypoenhancement at <2 min."
+    if (r.cat != "" || mm <= 0)
+        return r
+    if (aphe = 4)
+        r.note := "Rim APHE without washout of the rim does not meet LR-M criteria (v2027); scored as no APHE."
+    hasAphe := (aphe = 2), hasWo := (wo = 2)
+    if (!hasAphe)
+        c := (hasWo && mm >= 20) ? 4 : 3
+    else if (mm < 10)
+        c := hasWo ? 4 : 3
+    else
+        c := hasWo ? 5 : 4
+    r.base := "LR-" c
+    if (anc = 2 && c < 4)
+        c += 1, r.note := Trim(r.note " Ancillary features favor malignancy: upgraded from " r.base " (limited to LR-4).")
+    else if (anc = 3 && c = 5)
+        r.note := Trim(r.note " Ancillary features favoring benignity cannot downgrade LR-5 (v2027).")
+    else if (anc = 3)
+        c -= 1, r.note := Trim(r.note " Ancillary features favor benignity: downgraded from " r.base ".")
+    r.cat := "LR-" c
+    return r
+}
+
+PE_CEUSMgmt(cat) {
+    static m := {"LR-NC": "Alternative diagnostic imaging (CT or MRI) in 3 months or less (preferred), or repeat CEUS in 3 months or less if a technique correction would allow diagnostic imaging."
+        , "LR-1": "Return to routine surveillance in 6 months."
+        , "LR-2": "Return to routine surveillance in 6 months, or alternative diagnostic imaging (CT or MRI) in 6 months or less."
+        , "LR-3": "Alternative diagnostic imaging (CT or MRI) in 3 months or less (preferred), or repeat CEUS in 3 months or less. Multidisciplinary discussion may be needed."
+        , "LR-4": "Multidisciplinary discussion may be needed for consensus management. If neither biopsy, CT/MRI, nor treatment is planned, repeat or alternative diagnostic imaging in 3 months or less."
+        , "LR-5": "Diagnostic of HCC. Multidisciplinary discussion for consensus management."
+        , "LR-M": "Multidisciplinary discussion for consensus management; often includes biopsy, alternative or repeat imaging, or treatment."
+        , "LR-TIV": "Multidisciplinary discussion for consensus management; may include biopsy or biomarker correlation to determine the etiology of the tumor in vein."}
+    return m[cat]
+}
+
+PE_CEUSText(mm, agent, aphe, wo, anc, tiv, ovr, adq) {
+    r := PE_CEUSCalc(mm, aphe, wo, anc, tiv, ovr)
+    if (r.cat = "")
+        return ""
+    name := (r.cat = "LR-M") ? "probably or definitely malignant, not necessarily HCC" : PE_LIRADSName(r.cat)
+    out := "`n`nCEUS LI-RADS (v2027): CEUS " r.cat ", " name "."
+    adqName := ["A (no or minimal limitations)", "B (moderate limitations)", "C (severe limitations)"]
+    if (ovr = 1 && !tiv) {
+        apheTxt := ["no APHE", "nonrim APHE", "rim APHE with washout of the rim", "rim APHE without rim washout", "peripheral discontinuous nodular enhancement"]
+        woTxt := (agent = 2) ? ["no hypoenhancement at 1-5 min", "mild hypoenhancement at 1-2 min or hypoenhancement at 2-5 min", "early (<60 s) washout", "marked hypoenhancement at <2 min"]
+                            : ["no washout", "late (60 s or later) and mild washout", "early (<60 s) washout", "marked washout at <2 min"]
+        out .= "`nNodule: " (mm > 0 ? PE_Fmt(mm) " mm; " : "") (agent = 2 ? "Kupffer-cell agent" : "blood-pool agent") "; " apheTxt[aphe] "; " woTxt[wo] "."
+    }
+    if (r.note != "")
+        out .= "`n" r.note
+    out .= "`nLI-RADS Adequacy Score: " adqName[adq] "."
+    if (adq = 3)
+        out .= " Imaging may need to be repeated; consider a different technique or modality."
+    out .= "`nRecommendation: " PE_CEUSMgmt(r.cat)
+    if (ShowCitations)
+        out .= "`nRef: ACR LI-RADS CEUS v2027 Core."
+    return out
+}
+
+; ---------------- US LI-RADS Surveillance v2024 ----------------
+; cat: 1 US-1, 2 US-2, 3 US-3; vis: 1 A, 2 B, 3 C
+PE_USExtract(text) {
+    x := {cat: 1, vis: 1, afp: false}
+    if RegExMatch(text, "i)\bUS-?\s?([123])\b", m)
+        x.cat := m1
+    else {
+        mm := PE_TIRADSSize(text) * 10
+        if (mm >= 10)
+            x.cat := 3
+        else if (mm > 0)
+            x.cat := 2
+    }
+    if RegExMatch(text, "i)\bVIS-?\s?([ABC])\b", m)
+        x.vis := InStr("ABC", m1)
+    if RegExMatch(text, "i)thrombus") && !RegExMatch(text, "i)\bno\s+(?:\w+\s+){0,3}thrombus")
+        x.cat := 3
+    return x
+}
+
+PE_USText(cat, vis, afp, risk) {
+    catTxt := ["US-1 Negative", "US-2 Subthreshold", "US-3 Positive"]
+    visTxt := ["VIS-A (no or minimal limitations)", "VIS-B (moderate limitations)", "VIS-C (severe limitations)"]
+    if (cat = 3)
+        rec := "Diagnostic multiphase contrast-enhanced CT or MRI, or CEUS."
+    else if (afp)
+        rec := "AFP positive without a US-3 observation: diagnostic multiphase MRI or CT (CEUS is unlikely to help without a US correlate)."
+    else if (vis = 3 && risk)
+        rec := "Consider an alternative surveillance modality (e.g., abbreviated MRI or multiphase CT); repeat VIS-C is likely."
+    else if (vis = 3)
+        rec := "Repeat US within 3 months. If still VIS-C, consider an alternative surveillance strategy (e.g., abbreviated MRI or multiphase CT)."
+    else if (cat = 2)
+        rec := "Repeat US in 3-6 months, up to two times. If the observation is no longer seen or remains under 10 mm, return to routine 6-month surveillance."
+    else
+        rec := "Repeat US in 6 months."
+    out := "`n`nLI-RADS US Surveillance (v2024): " catTxt[cat] ", " visTxt[vis] "."
+    out .= "`nRecommendation: " rec
+    if (ShowCitations)
+        out .= "`nRef: ACR LI-RADS US Surveillance v2024 Core."
+    return out
+}
+
+; ---------------- LI-RADS Treatment Response v2024 ----------------
+; tx: 1 CT/MRI nonradiation, 2 CT/MRI radiation, 3 CEUS nonradiation
+; mass (CT/MRI): 1 cannot assess, 2 none, 3 uncertain [rad: present, stable/decreased], 4 present [rad: new/increased]
+; intra/peri (CEUS): 1 absent, 2 uncertain, 3 present
+PE_TRACat(tx, mass, af, intra, peri, ne) {
+    if (tx = 3) {
+        if (ne)
+            return "Nonevaluable"
+        if (intra = 3 || peri = 3)
+            return "Viable"
+        if (intra = 2 || peri = 2)
+            return "Equivocal"
+        return "Nonviable"
+    }
+    if (mass = 1)
+        return "Nonevaluable"
+    if (mass = 2)
+        return "Nonviable"
+    if (mass = 4)
+        return "Viable"
+    if (af)
+        return "Viable"
+    return (tx = 2) ? "Nonprogressing" : "Equivocal"
+}
+
+PE_TRAText(tx, mass, af, intra, peri, ne, mm) {
+    cat := PE_TRACat(tx, mass, af, intra, peri, ne)
+    name := ["CT/MRI Nonradiation TRA v2024", "CT/MRI Radiation TRA v2024", "CEUS Nonradiation TRA v2024"]
+    if (cat = "Nonevaluable")
+        rec := "Repeat imaging in 3 months or less."
+    else if (cat = "Nonviable")
+        rec := "Continue monitoring in about 3 months."
+    else if (cat = "Viable")
+        rec := "Multidisciplinary discussion for consensus management, often including retreatment."
+    else if (tx = 3)
+        rec := "Continue monitoring in about 3 months. Multidisciplinary discussion for consensus management (often CT or MRI) if stable or increasing 6 months or more after treatment, or new in a previously nonviable lesion."
+    else
+        rec := "Continue monitoring in about 3 months; multidisciplinary discussion in unusual or complex cases."
+    out := "`n`nLI-RADS Treatment Response (" name[tx] "): LR-TR " cat "."
+    if (mm > 0 && cat != "Nonviable" && cat != "Nonevaluable")
+        out .= "`nMasslike enhancement measures " PE_Fmt(mm) " mm."
+    if (af && tx != 3 && (mass = 3))
+        out .= "`nUpgraded to LR-TR Viable by ancillary features (diffusion restriction or T2 hyperintensity" (tx = 2 ? ", new or increased" : "") ")."
+    out .= "`nRecommendation: " rec
+    if (ShowCitations)
+        out .= "`nRef: ACR LI-RADS " name[tx] " Core."
+    return out
+}
+
+PE_TRAExtract(text) {
+    x := {tx: 1}
+    if RegExMatch(text, "i)CEUS|contrast-enhanced\s+(?:ultrasound|US)|microbubble")
+        x.tx := 3
+    else if RegExMatch(text, "i)\bTARE\b|radioembol|Y-?90|yttrium|SBRT|stereotactic|radiation|proton")
+        x.tx := 2
+    return x
+}
+
+; Which LI-RADS module fits the highlighted text
+PE_LIRADSMode(text) {
+    if RegExMatch(text, "i)LR-?TR|treated\s+(?:lesion|observation)|post-?(?:treatment|ablation|TACE)|\bTACE\b|\bTARE\b|ablation|radioembol|Y-?90|SBRT|chemoemboli")
+        return "tra"
+    if RegExMatch(text, "i)\bCEUS\b|contrast-enhanced\s+(?:ultrasound|US)|microbubble|sonazoid|definity|lumason")
+        return "ceus"
+    if RegExMatch(text, "i)\bUS-?\s?[123]\b|\bVIS-?\s?[ABC]\b|surveillance\s+(?:ultrasound|US)")
+        return "us"
+    return "ctmr"
+}
+
+; ---------------- LI-RADS window (one window, four modules) ----------------
+SP_ShowLIRADSGui(prefill := "", mode := "") {
     SP_Init()
     prevGui := A_DefaultGui
-    x := PE_LIRADSExtract(prefill)
+    if (mode = "")
+        mode := PE_LIRADSMode(prefill)
+    SP_LRMode := mode, SP_LRLastTx := 0
     dark := DarkMode
     bg := dark ? "1E1E1E" : "F0F0F0", fg := dark ? "E6E6E6" : "000000"
-    sz := x.mm > 0 ? PE_Fmt(x.mm) : ""
-    aphe := x.aphe ? 1 : 0, wo := x.washout ? 1 : 0, cap := x.capsule ? 1 : 0
-    tg := x.growth ? 1 : 0, tiv := x.tiv ? 1 : 0, lrm := x.lrm ? 1 : 0
-    Gui, SPLR:New, +AlwaysOnTop -MinimizeBox +HwndhL +LabelSPLR_, LI-RADS CT/MRI v2018
+    titles := {ctmr: "LI-RADS CT/MRI v2018 (diagnostic)", ceus: "CEUS LI-RADS v2027 (diagnostic)", us: "LI-RADS US Surveillance v2024", tra: "LI-RADS Treatment Response v2024"}
+    Gui, SPLR:New, +AlwaysOnTop -MinimizeBox +HwndhL +LabelSPLR_, % titles[mode]
     Gui, SPLR:Color, %bg%, % dark ? "2D2D2D" : "FFFFFF"
     Gui, SPLR:Font, s10 c%fg%, Segoe UI
-    Gui, SPLR:Add, Text, x10 y12 w190, Observation size (mm):
-    Gui, SPLR:Add, Edit, x205 y9 w70 vSPL_Size gSPL_Update, %sz%
-    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPL_APHE gSPL_Update Checked%aphe%, Nonrim arterial phase hyperenhancement (APHE)
-    Gui, SPLR:Font, s10 bold c%fg%
-    Gui, SPLR:Add, Text, x10 y+10 w420, Additional major features
-    Gui, SPLR:Font, s10 norm c%fg%
-    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_WO gSPL_Update Checked%wo%, Nonperipheral washout
-    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_Cap gSPL_Update Checked%cap%, Enhancing capsule
-    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TG gSPL_Update Checked%tg%, Threshold growth (size up 50`% or more in 6 months or less)
-    Gui, SPLR:Add, Text, x10 y+12 w140, Ancillary features:
-    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Anc gSPL_Update AltSubmit Choose1, None / not applied|Favor malignancy (up 1, max LR-4)|Favor benignity (down 1)
-    Gui, SPLR:Font, s10 bold c%fg%
-    Gui, SPLR:Add, Text, x10 y+12 w420, These take precedence
-    Gui, SPLR:Font, s10 norm c%fg%
-    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TIV gSPL_Update Checked%tiv%, Tumor in vein (LR-TIV)
-    Gui, SPLR:Add, Checkbox, x20 y+4 w410 r2 vSPL_LRM gSPL_Update Checked%lrm%, LR-M features (targetoid, rim APHE, peripheral washout, delayed central enhancement)
-    Gui, SPLR:Add, Text, x10 y+12 w140, Category:
-    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Ovr gSPL_Update AltSubmit Choose1, From the features above|LR-1 Definitely benign|LR-2 Probably benign|LR-NC Cannot be categorized
-    Gui, SPLR:Font, s8 c808080
-    Gui, SPLR:Add, Text, x10 y+8 w420, For untreated observations in high-risk patients (cirrhosis, chronic hepatitis B, current or prior HCC). Pre-filled from the highlighted text: check every box before inserting.
+    Gui, SPLR:Add, Text, x10 y12 w90, Module:
+    modeMap := {ctmr: 1, ceus: 2, us: 3, tra: 4}
+    modeIdx := modeMap[mode]
+    Gui, SPLR:Add, DropDownList, x100 y9 w330 vSPL_Mode gSPL_ModeChange AltSubmit Choose%modeIdx%, CT/MRI diagnostic (v2018)|CEUS diagnostic (v2027)|US surveillance (v2024)|Treatment response (v2024)
+    SP_LRPrefill := prefill
+    if (mode = "ceus")
+        SP_LRBuildCEUS(prefill, fg)
+    else if (mode = "us")
+        SP_LRBuildUS(prefill, fg)
+    else if (mode = "tra")
+        SP_LRBuildTRA(prefill, fg)
+    else
+        SP_LRBuildCTMR(prefill, fg)
     Gui, SPLR:Font, s10 c%fg%
-    Gui, SPLR:Add, Edit, x10 y+6 w420 r6 ReadOnly vSPL_Preview
+    Gui, SPLR:Add, Edit, x10 y+8 w420 r7 ReadOnly vSPL_Preview
     Gui, SPLR:Add, Button, x10 y+10 w133 Default gSPL_Insert, Insert
     Gui, SPLR:Add, Button, x+10 yp w133 gSPL_Copy, Copy
     Gui, SPLR:Add, Button, x+10 yp w134 gSPL_Cancel, Cancel
@@ -1816,19 +2045,162 @@ SP_ShowLIRADSGui(prefill := "") {
         SP_DarkenGui(hL)
     SP_FitOnMouseMonitor(hL)
     SP_Front(hL)
-    GuiControl, SPLR:Focus, SPL_Size
     SPL_Update()
     Gui, %prevGui%:Default
+}
+
+SP_LRNote(fg, txt) {
+    Gui, SPLR:Font, s8 c808080
+    Gui, SPLR:Add, Text, x10 y+8 w420, %txt%
+    Gui, SPLR:Font, s10 c%fg%
+}
+SP_LRHead(fg, txt) {
+    Gui, SPLR:Font, s10 bold c%fg%
+    Gui, SPLR:Add, Text, x10 y+10 w420, %txt%
+    Gui, SPLR:Font, s10 norm c%fg%
+}
+
+SP_LRBuildCTMR(prefill, fg) {
+    x := PE_LIRADSExtract(prefill)
+    sz := x.mm > 0 ? PE_Fmt(x.mm) : ""
+    aphe := x.aphe ? 1 : 0, wo := x.washout ? 1 : 0, cap := x.capsule ? 1 : 0
+    tg := x.growth ? 1 : 0, tiv := x.tiv ? 1 : 0, lrm := x.lrm ? 1 : 0
+    Gui, SPLR:Add, Text, x10 y+12 w190, Observation size (mm):
+    Gui, SPLR:Add, Edit, x205 yp-3 w70 vSPL_Size gSPL_Update, %sz%
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPL_APHE gSPL_Update Checked%aphe%, Nonrim arterial phase hyperenhancement (APHE)
+    SP_LRHead(fg, "Additional major features")
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_WO gSPL_Update Checked%wo%, Nonperipheral washout
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_Cap gSPL_Update Checked%cap%, Enhancing capsule
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TG gSPL_Update Checked%tg%, Threshold growth (size up 50`% or more in 6 months or less)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Ancillary features:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Anc gSPL_Update AltSubmit Choose1, None / not applied|Favor malignancy (up 1, max LR-4)|Favor benignity (down 1)
+    SP_LRHead(fg, "These take precedence")
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TIV gSPL_Update Checked%tiv%, Tumor in vein (LR-TIV)
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 r2 vSPL_LRM gSPL_Update Checked%lrm%, LR-M features (targetoid, rim APHE, peripheral washout, delayed central enhancement)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Category:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Ovr gSPL_Update AltSubmit Choose1, From the features above|LR-1 Definitely benign|LR-2 Probably benign|LR-NC Cannot be categorized
+    SP_LRNote(fg, "Untreated observation, high-risk patient (cirrhosis, chronic hepatitis B, current or prior HCC). Pre-filled from the highlighted text: check every box before inserting.")
+}
+
+SP_LRBuildCEUS(prefill, fg) {
+    x := PE_CEUSExtract(prefill)
+    sz := x.mm > 0 ? PE_Fmt(x.mm) : ""
+    tiv := x.tiv ? 1 : 0
+    SP_LRCeusAgent := x.agent
+    Gui, SPLR:Add, Text, x10 y+12 w190, Nodule size (mm, B-mode):
+    Gui, SPLR:Add, Edit, x205 yp-3 w70 vSPC_Size gSPL_Update, %sz%
+    Gui, SPLR:Add, Text, x10 y+12 w140, Contrast agent:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPC_Agent gSPL_Update AltSubmit Choose" x.agent, Blood-pool agent (Lumason, Definity)|Kupffer-cell agent (Sonazoid)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Arterial phase:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPC_APHE gSPL_Update AltSubmit Choose" x.aphe, No APHE|Nonrim APHE|Rim APHE, then washout of the rim (LR-M)|Rim APHE, no washout of the rim|Peripheral discontinuous nodular (hemangioma)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Washout:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPC_WO gSPL_Update AltSubmit Choose" x.wo, % SP_LRWashItems(x.agent)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Ancillary features:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPC_Anc gSPL_Update AltSubmit Choose1, None / not applied|Favor malignancy (up 1, max LR-4)|Favor benignity (down 1, not from LR-5)
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPC_TIV gSPL_Update Checked%tiv%, Tumor in vein (CEUS LR-TIV)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Category:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPC_Ovr gSPL_Update AltSubmit Choose1, From the features above|LR-1 Definitely benign|LR-2 Probably benign|LR-NC Cannot be categorized
+    Gui, SPLR:Add, Text, x10 y+12 w140, Adequacy score:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPC_Adq gSPL_Update AltSubmit Choose1, A - No or minimal limitations|B - Moderate limitations|C - Severe limitations
+    SP_LRNote(fg, "Untreated nodule visible on B-mode US, high-risk patient. LR-M: rim APHE with rim washout, early (<60 s) washout, or marked washout at <2 min. Unsure about a feature: treat it as absent.")
+}
+
+SP_LRWashItems(agent) {
+    if (agent = 2)
+        return "No hypoenhancement at 1-5 min|Mild hypoenhancement at 1-2 min, or any at 2-5 min|Early washout (under 60 s) (LR-M)|Marked hypoenhancement within 2 min (LR-M)"
+    return "No washout|Late (60 s or later) and mild washout|Early washout (under 60 s) (LR-M)|Marked washout within 2 min (LR-M)"
+}
+
+SP_LRBuildUS(prefill, fg) {
+    x := PE_USExtract(prefill)
+    Gui, SPLR:Add, Text, x10 y+12 w140, US category:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPU_Cat gSPL_Update AltSubmit Choose" x.cat, US-1 Negative (none / definitely benign)|US-2 Subthreshold (under 10 mm)|US-3 Positive (10 mm+, distortion, new vein thrombus)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Visualization:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPU_Vis gSPL_Update AltSubmit Choose" x.vis, VIS-A No or minimal limitations|VIS-B Moderate limitations|VIS-C Severe limitations
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPU_AFP gSPL_Update, AFP positive (per referrer / AASLD definition)
+    Gui, SPLR:Add, Checkbox, x10 y+6 w420 r2 vSPU_Risk gSPL_Update, Risk factors for repeat VIS-C (MASH or alcohol cirrhosis, Child-Pugh B/C, BMI 35 or more)
+    SP_LRNote(fg, "Surveillance US in a patient at high risk for HCC. US-3 or AFP positive takes priority, then VIS-C, then US-2 / US-1.")
+}
+
+SP_LRBuildTRA(prefill, fg) {
+    x := PE_TRAExtract(prefill)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Treatment / exam:
+    Gui, SPLR:Add, DropDownList, % "x150 yp-3 w280 vSPT_Tx gSPL_Update AltSubmit Choose" x.tx, CT/MRI after TACE, TAE, ablation or resection|CT/MRI after TARE (Y-90) or SBRT|CEUS after TACE, TAE, ablation or resection
+    SP_LRHead(fg, "CT / MRI")
+    Gui, SPLR:Add, Text, x20 y+4 w130, Masslike enhancement:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPT_Mass gSPL_Update AltSubmit Choose2, % SP_LRMassItems(x.tx)
+    Gui, SPLR:Add, Checkbox, x20 y+8 w410 r2 vSPT_AF gSPL_Update, % SP_LRAFText(x.tx)
+    SP_LRHead(fg, "CEUS")
+    Gui, SPLR:Add, Text, x20 y+4 w130, Intralesional:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPT_Intra gSPL_Update AltSubmit Choose1, Absent (no intralesional enhancement)|Uncertain|Present
+    Gui, SPLR:Add, Text, x20 y+10 w130, Perilesional:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPT_Peri gSPL_Update AltSubmit Choose1, Absent (enhances like liver)|Uncertain|Present (APHE with washout)
+    Gui, SPLR:Add, Checkbox, x20 y+8 w410 vSPT_NE gSPL_Update, Not evaluable (LR-TR Nonevaluable)
+    Gui, SPLR:Add, Text, x10 y+12 w200, Enhancing tissue size (mm, optional):
+    Gui, SPLR:Add, Edit, x215 yp-3 w70 vSPT_Size gSPL_Update
+    SP_LRNote(fg, "Per treated lesion. New or untreated observations outside the treatment zone: use the diagnostic module. Unsure between two categories: choose the less certain one.")
+}
+
+SP_LRMassItems(tx) {
+    if (tx = 2)
+        return "Cannot be assessed (degraded / omitted)|None|Present, stable or smaller over time|Present, new or larger over time"
+    return "Cannot be assessed (degraded / omitted)|None|Uncertain (presence or shape)|Present (any degree, any phase)"
+}
+SP_LRAFText(tx) {
+    if (tx = 2)
+        return "Ancillary: new or increasing diffusion restriction or mild-moderate T2 hyperintensity (Nonprogressing -> Viable)"
+    return "Ancillary: diffusion restriction or mild-moderate T2 hyperintensity where enhancement is uncertain (Equivocal -> Viable)"
+}
+
+SPL_ModeChange(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    Gui, SPLR:Submit, NoHide
+    modes := ["ctmr", "ceus", "us", "tra"]
+    if (modes[SPL_Mode] = SP_LRMode)
+        return
+    p := SP_LRPrefill
+    SPL_Cancel()
+    SP_ShowLIRADSGui(p, modes[SPL_Mode])
 }
 
 SPL_Update(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
     if (!SP_LRHwnd)
         return
     Gui, SPLR:Submit, NoHide
-    mm := RegExReplace(SPL_Size, "[^\d.]")
-    mm := PE_IsNum(mm) ? mm + 0 : 0
-    SP_LRText := PE_LIRADSText(mm, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr)
-    msg := SP_LRText != "" ? Trim(SP_LRText, "`n") : "Enter the observation size (mm)."
+    if (SP_LRMode = "ceus") {
+        if (SPC_Agent != SP_LRCeusAgent) {          ; washout wording depends on the agent
+            SP_LRCeusAgent := SPC_Agent
+            GuiControl, SPLR:, SPC_WO, % "|" SP_LRWashItems(SPC_Agent)
+            GuiControl, SPLR:Choose, SPC_WO, % (SPC_WO >= 1 ? SPC_WO : 1)
+            Gui, SPLR:Submit, NoHide
+        }
+        mm := RegExReplace(SPC_Size, "[^\d.]"), mm := PE_IsNum(mm) ? mm + 0 : 0
+        SP_LRText := PE_CEUSText(mm, SPC_Agent, SPC_APHE, SPC_WO, SPC_Anc, SPC_TIV, SPC_Ovr, SPC_Adq)
+        hint := "Enter the nodule size (mm)."
+    } else if (SP_LRMode = "us") {
+        SP_LRText := PE_USText(SPU_Cat, SPU_Vis, SPU_AFP, SPU_Risk)
+        hint := ""
+    } else if (SP_LRMode = "tra") {
+        if (SPT_Tx != SP_LRLastTx) {
+            SP_LRLastTx := SPT_Tx
+            ct := (SPT_Tx != 3)
+            GuiControl, SPLR:, SPT_Mass, % "|" SP_LRMassItems(SPT_Tx)
+            GuiControl, SPLR:Choose, SPT_Mass, 2
+            GuiControl, SPLR:, SPT_AF, % SP_LRAFText(SPT_Tx)
+            for _, c in ["SPT_Mass", "SPT_AF"]
+                GuiControl, % "SPLR:" (ct ? "Enable" : "Disable"), %c%
+            for _, c in ["SPT_Intra", "SPT_Peri", "SPT_NE"]
+                GuiControl, % "SPLR:" (ct ? "Disable" : "Enable"), %c%
+            Gui, SPLR:Submit, NoHide
+        }
+        mm := RegExReplace(SPT_Size, "[^\d.]"), mm := PE_IsNum(mm) ? mm + 0 : 0
+        SP_LRText := PE_TRAText(SPT_Tx, SPT_Mass, SPT_AF, SPT_Intra, SPT_Peri, SPT_NE, mm)
+        hint := ""
+    } else {
+        mm := RegExReplace(SPL_Size, "[^\d.]"), mm := PE_IsNum(mm) ? mm + 0 : 0
+        SP_LRText := PE_LIRADSText(mm, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr)
+        hint := "Enter the observation size (mm)."
+    }
+    msg := SP_LRText != "" ? Trim(SP_LRText, "`n") : hint
     GuiControl, SPLR:, SPL_Preview, %msg%
 }
 
@@ -1836,7 +2208,7 @@ SPL_Insert(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
     Critical
     SPL_Update()
     if (SP_LRText = "") {
-        MsgBox, 262192, LI-RADS, Enter the observation size first.
+        MsgBox, 262192, LI-RADS, Enter the size first.
         return
     }
     txt := SP_LRText
@@ -1869,5 +2241,6 @@ SPLR_Escape(GuiHwnd := 0) {
 }
 
 SP_MenuLIRADS(itemName := "", itemPos := "", menuName := "") {
-    SP_ShowLIRADSGui(g_SelectedText)
+    modes := {"CT/MRI diagnostic (v2018)": "ctmr", "CEUS diagnostic (v2027)": "ceus", "US surveillance (v2024)": "us", "Treatment response (v2024)": "tra"}
+    SP_ShowLIRADSGui(g_SelectedText, modes.HasKey(itemName) ? modes[itemName] : "")
 }
