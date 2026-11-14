@@ -3230,8 +3230,7 @@ ProcessNodules(text) {
     if (globalHighRisk || mostSignificantNodule.Morphology == "spiculated")
         result .= "`n`nNote: Patient has risk factors or morphologic characteristics that may increase the risk of lung cancer."
 
-    if (ShowCitations)
-        result .= "`n`nCitation: MacMahon H, Naidich DP, Goo JM, et al. Guidelines for Management of Incidental Pulmonary Nodules Detected on CT Images: From the Fleischner Society 2017. Radiology. 2017;284(1):228-243. doi:10.1148/radiol.2017161659"
+    result .= "`n`nCitation: MacMahon H, Naidich DP, Goo JM, et al. Guidelines for Management of Incidental Pulmonary Nodules Detected on CT Images: From the Fleischner Society 2017. Radiology. 2017;284(1):228-243. doi:10.1148/radiol.2017161659"
    
     return result
 }
@@ -6125,15 +6124,34 @@ PE_Fleischner(text) {
         else
             maxPart := Max(maxPart, f.size)
     }
-    r := "`n`n___________________________________________________________`n"
+    ; Impression sentence: "Multiple solid pulmonary nodules, the largest measuring 7 mm in the right upper lobe."
+    big := found[1], nTypes := 0, seen := {}
+    for _, f in found {
+        if !seen.HasKey(f.type)
+            seen[f.type] := true, nTypes++
+        if (f.size > big.size)
+            big := f
+    }
+    tn := {solid: "solid", subsolid: "ground-glass", "part-solid": "part-solid"}
+    mix := ""
+    for _, k in ["solid", "part-solid", "subsolid"]
+        if seen.HasKey(k)
+            mix .= (mix != "" ? " and " : "") tn[k]
+    if (nTypes = 1)
+        typeDesc := tn[big.type] " "
+    else
+        typeDesc := ""
+    sizeTxt := big.sub6 ? "less than 6 mm" : PE_Fmt(big.size) " mm"
+    if (isMultiple)
+        r := "`n`nMultiple " typeDesc "pulmonary nodules" (typeDesc = "" ? " (" mix ")" : "")
+            . ", the largest measuring " sizeTxt (typeDesc = "" ? " (" tn[big.type] ")" : "")
+    else
+        r := "`n`nSingle " typeDesc "pulmonary nodule measuring " sizeTxt
+    r .= (big.lobe != "" ? " in the " big.lobe : "") ". Recommendations for follow-up as detailed below."
+    r .= "`n`n___________________________________________________________`n"
     r .= "Incidental Lung Nodule Discussion:`n"
     r .= "2017 ACR Fleischner Society expert consensus recommendations on incidental pulmonary nodules.`n"
-    r .= "Target Demographic: 35+ years without known cancer or immunosuppressive disorder.`n`n"
-    r .= "Detected nodules:`n"
-    for i, f in found {
-        typeName := f.type = "solid" ? "solid" : f.type = "subsolid" ? "ground glass/subsolid" : "part-solid"
-        r .= i ". " (f.sub6 ? "<6" : PE_Fmt(f.size)) " mm " typeName " nodule" (f.lobe != "" ? " (" f.lobe ")" : "") "`n"
-    }
+    r .= "Target Demographic: 35+ years without known cancer or immunosuppressive disorder.`n"
     recLow := PE_FleischnerRec(maxSolid, maxSub, maxPart, isMultiple, "Low risk")
     recHigh := PE_FleischnerRec(maxSolid, maxSub, maxPart, isMultiple, "High risk")
     for _, f in found {
@@ -6147,8 +6165,7 @@ PE_Fleischner(text) {
     if (SP_IncludeDatamining)
         r .= "`n`n" SP_DataminingPhrase "`nACR and AMA MIPS #364"
     r .= "`n`nNote: The need for followup depends on clinical discussion of patient's comorbid conditions, demographics, and willingness to undergo followup imaging and potential intervention."
-    if (ShowCitations)
-        r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"
+    r .= "`nRef: MacMahon H et al. Radiology 2017;284:228-243"     ; Fleischner reference always shown
     r .= "`n___________________________________________________________"
     summary := ""
     for _, f in found
@@ -6515,21 +6532,30 @@ PE_ORADS(text) {
         age := am[1] + 0
         meno := age < 45 ? "pre" : age >= 55 ? "post" : ""
     }
+    side := ""
+    if PE_RX(t, "i)\b(right|left)\s+(?:\w+\s+){0,3}?(?:ovar|adnex)", sm)
+        side := Format("{:T}", sm[1]) " "
+    else if PE_RX(t, "i)(?:ovar|adnex)\w*\s+(?:\w+\s+){0,3}?(?:on\s+the\s+)?(right|left)\b", sm)
+        side := Format("{:T}", sm[1]) " "
+    dx := {hemorrhagic: "compatible with a hemorrhagic cyst", endometrioma: "compatible with an endometrioma"
+        , dermoid: "compatible with a dermoid (mature cystic teratoma)"}
     if (cm >= 10) {
         cat := "O-RADS US 3 (low risk)"
-        rec := "Classic benign-appearing lesion 10 cm or larger: management by gynecologist; consider MRI (O-RADS MRI)."
-        res := "`n`nOvarian/adnexal cyst: " PE_Fmt(cm) " cm " type " cyst. " cat ". " rec
+        recTxt := "Classic benign-appearing lesion 10 cm or larger: management by gynecologist; consider MRI (O-RADS MRI)."
     } else {
         cat := (type = "simple" && cm <= 3 && meno != "post") ? "O-RADS US 1 (normal ovary, physiologic follicle)" : "O-RADS US 2 (almost certainly benign)"
-        if (meno = "")
-            rec := "Premenopausal: " PE_ORADSRec(type, cm, "pre") " Postmenopausal: " PE_ORADSRec(type, cm, "post")
-        else
-            rec := PE_ORADSRec(type, cm, meno)
         if (type = "simple" && cm <= 3 && meno = "")
             cat := "O-RADS US 1 if premenopausal (physiologic follicle), O-RADS US 2 if postmenopausal"
-        res := "`n`nOvarian/adnexal cyst: " PE_Fmt(cm) " cm " type " cyst" (meno != "" ? " in a " meno "menopausal patient" : "") ". " cat ". " rec
+        if (meno = "")
+            recTxt := "`n- If premenopausal: " PE_ORADSRec(type, cm, "pre") "`n- If postmenopausal: " PE_ORADSRec(type, cm, "post")
+        else
+            recTxt := "(" meno "menopausal): " PE_ORADSRec(type, cm, meno)
     }
-    res .= "`nRef: O-RADS US v2022 (ACR); follow-up per SRU consensus (Levine et al. Radiology 2010;256:943-954 and 2019;293:359-371)."
+    side1 := (side != "" ? side "ovarian" : "Ovarian") (type = "simple" ? " simple" : "")
+    res := "`n`n" side1 " cyst (" PE_Fmt(cm) " cm)" (type = "simple" ? "" : " " dx[type]) ". " cat "."
+    res .= "`nRecommendation" (SubStr(recTxt, 1, 1) = "(" ? " " recTxt : (SubStr(recTxt, 1, 1) = "`n" ? ":" recTxt : ": " recTxt))
+    if (ShowCitations)
+        res .= "`n`nRef: O-RADS US v2022 (ACR); follow-up per SRU consensus (Levine et al. Radiology 2010;256:943-954 and 2019;293:359-371)."
     vals := [["Size (largest)", PE_Fmt(cm) " cm"], ["Type", type], ["Menopausal status", meno = "" ? "not stated (both given)" : meno "menopausal"], ["Category", cat]]
     return PE_Ok("Ovarian Cyst (O-RADS / SRU)", vals, res, meno = "" ? 75 : 90, true)
 }
