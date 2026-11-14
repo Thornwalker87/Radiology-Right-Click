@@ -55,7 +55,8 @@ QC_Init() {
 
     ; ---- user settings ----
     QC_OpenAtStart     := true      ; open the panel when the script starts
-    QC_DialMode        := "url"     ; "url" = Google Voice | "teams" = Microsoft Teams | "tel" = tel: link
+    QC_DialMode        := "url"     ; "url" = Google Voice on this computer | "cell" = Google Voice rings your cell
+                                    ; "teams" = Microsoft Teams | "tel" = tel: link
                                     ; (also switchable by right-clicking a panel button; the choice is saved)
     QC_GVAccount       := 0         ; Google account index if signed into several
     QC_AutoConfirm     := true      ; auto-press Call on Google Voice's "Call?" prompt
@@ -82,7 +83,7 @@ QC_Init() {
     IniRead, col, %QC_IniFile%, Panel, Collapsed, 0
     QC_Collapsed := (col = "1")
     IniRead, dm, %QC_IniFile%, Settings, DialMode, %A_Space%
-    if RegExMatch(dm, "^(url|teams|tel)$")
+    if RegExMatch(dm, "^(url|cell|teams|tel)$")
         QC_DialMode := dm
     QC_CW := 0, QC_CH := 0
     OnExit("QC_OnExit")
@@ -695,10 +696,12 @@ QC_Panel_ContextMenu(GuiHwnd := 0, CtrlHwnd := 0, EventInfo := "", IsRightClick 
     Menu, QCCtx, Add
     Menu, QCCtx, Add, Open phone book editor..., QC_MenuEditor
     Menu, QCCtx, Add
-    Menu, QCCtx, Add, Call with Google Voice, QC_CtxModeGV
-    Menu, QCCtx, Add, Call with Microsoft Teams, QC_CtxModeTeams
-    Menu, QCCtx, % (QC_DialMode = "url" ? "Check" : "Uncheck"), Call with Google Voice
-    Menu, QCCtx, % (QC_DialMode = "teams" ? "Check" : "Uncheck"), Call with Microsoft Teams
+    Menu, QCCtx, Add, Place calls from this computer (Google Voice), QC_CtxModeGV
+    Menu, QCCtx, Add, Place calls from my cell phone (Google Voice), QC_CtxModeCell
+    Menu, QCCtx, Add, Place calls with Microsoft Teams, QC_CtxModeTeams
+    Menu, QCCtx, % (QC_DialMode = "url" ? "Check" : "Uncheck"), Place calls from this computer (Google Voice)
+    Menu, QCCtx, % (QC_DialMode = "cell" ? "Check" : "Uncheck"), Place calls from my cell phone (Google Voice)
+    Menu, QCCtx, % (QC_DialMode = "teams" ? "Check" : "Uncheck"), Place calls with Microsoft Teams
     Menu, QCCtx, Show
 }
 QC_CtxEditNum(p1 := "", p2 := "", p3 := "") {
@@ -933,19 +936,53 @@ QC_Dial(num, label := "") {
         MsgBox, 262192, Quick Call, Could not open the dialer link. Is a default browser set?
         return
     }
-    if (QC_AutoConfirm && QC_DialMode = "url")
+    if (QC_AutoConfirm && (QC_DialMode = "url" || QC_DialMode = "cell"))
         SetTimer, QC_ConfirmCall, -250
     QC_LastCall := {label: (label != "" ? label : QC_FormatPhone(d)), time: A_Now}
-    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : ""), 3000)
+    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : QC_DialMode = "cell" ? "  - answer your cell" : ""), 3000)
 }
 
+; Works whether or not the panel has been initialised (Preferences calls these).
+QC_GetDialMode() {
+    if (QC_DialMode != "")
+        return QC_DialMode
+    IniRead, dm, %A_ScriptDir%\QuickCall_Settings.ini, Settings, DialMode, url
+    return RegExMatch(dm, "^(url|cell|teams|tel)$") ? dm : "url"
+}
+QC_DialModeName(mode) {
+    return mode = "cell" ? "your cell phone (Google Voice)" : mode = "teams" ? "Microsoft Teams"
+        : mode = "tel" ? "the phone app (tel:)" : "this computer (Google Voice)"
+}
+
+; Switching between computer and cell needs one Google Voice setting changed;
+; say exactly which one and offer to open the settings page.
 QC_SetDialMode(mode) {
+    old := QC_GetDialMode()
     QC_DialMode := mode
-    IniWrite, %mode%, %QC_IniFile%, Settings, DialMode
-    QC_Tip("Quick Call now dials with " (mode = "teams" ? "Microsoft Teams" : mode = "tel" ? "the phone app (tel:)" : "Google Voice"), 2000)
+    ini := (QC_IniFile != "") ? QC_IniFile : A_ScriptDir "\QuickCall_Settings.ini"
+    IniWrite, %mode%, %ini%, Settings, DialMode
+    acct := (QC_GVAccount != "") ? QC_GVAccount : 0
+    msg := ""
+    if (mode = "cell" && old != "cell")
+        msg := "Quick Call will now place calls from your cell phone.`n`nGoogle Voice rings your cell first: answer it and the call connects. The call audio goes over the cell network, not this computer.`n`nOne-time setup: in Google Voice open Settings > Calls and turn ON ""Always use my phone to place calls"" (your cell must be listed as a linked number).`n`nOpen Google Voice settings now?"
+    else if (mode = "url" && old = "cell")
+        msg := "Quick Call will now place calls from this computer (dictaphone / headset).`n`nIn Google Voice open Settings > Calls and turn OFF ""Always use my phone to place calls"", or Google Voice will keep ringing your cell.`n`nOpen Google Voice settings now?"
+    if (msg != "") {
+        QC_DialogOpen++
+        MsgBox, 262180, Quick Call, %msg%
+        QC_DialogOpen--
+        IfMsgBox, Yes
+            Run, % "https://voice.google.com/u/" acct "/settings"
+        return
+    }
+    note := (mode = "teams") ? "`n(needs outside calling in Teams: a dial pad on the Calls tab)" : ""
+    QC_Tip("Quick Call now places calls from " QC_DialModeName(mode) note, 3000)
 }
 QC_CtxModeGV(p1 := "", p2 := "", p3 := "") {
     QC_SetDialMode("url")
+}
+QC_CtxModeCell(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("cell")
 }
 QC_CtxModeTeams(p1 := "", p2 := "", p3 := "") {
     QC_SetDialMode("teams")

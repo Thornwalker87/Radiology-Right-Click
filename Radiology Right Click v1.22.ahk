@@ -38,6 +38,8 @@ global ShowNASCETCalculator := true
 global ShowRVLVCalculator := true
 global ShowSpellCheck := true
 global SP_ShowParse := true, SP_ShowTIRADS := true, SP_ShowORADS := true, SP_ShowBoneAge := false   ; Smart Parse (SmartParse_v1 module)
+global SP_ShowLIRADS := false     ; Liver LI-RADS CT/MRI window (off by default)
+global QC_PrefDial                ; Preferences: "Place calls from" choice
 global QuickCallEnabled := true   ; Quick Call floating phone panel (QuickCall_v1.ahk)
 
 ; -------------- NEW/CHANGED CODE --------------
@@ -212,6 +214,8 @@ LoadPreferencesFromFile() {
         IniRead, SP_ShowTIRADS, %preferencesFile%, SmartParse, ShowTIRADS, 1
         IniRead, SP_ShowORADS, %preferencesFile%, SmartParse, ShowORADS, 1
         IniRead, SP_ShowBoneAge, %preferencesFile%, SmartParse, ShowBoneAge, 0
+        IniRead, SP_ShowLIRADS, %preferencesFile%, SmartParse, ShowLIRADS, 0
+        SP_ShowLIRADS := (SP_ShowLIRADS = "1")
         SP_ShowParse := (SP_ShowParse = "1"), SP_ShowTIRADS := (SP_ShowTIRADS = "1")
         SP_ShowORADS := (SP_ShowORADS = "1"), SP_ShowBoneAge := (SP_ShowBoneAge = "1")
 
@@ -359,7 +363,7 @@ CreateCustomMenu() {
 	Menu, CustomMenu, Add
     ; Smart Parse: highlight dictation -> auto-detect calculation (SmartParse_v1 module)
     if (SP_ShowParse) {
-        SP_AddMenu("CustomMenu", SP_ShowTIRADS, SP_ShowORADS, SP_ShowBoneAge)
+        SP_AddMenu("CustomMenu", SP_ShowTIRADS, SP_ShowORADS, SP_ShowBoneAge, SP_ShowLIRADS)
         Menu, CustomMenu, Add
     }
 	
@@ -868,7 +872,7 @@ ShowPreferences() {
 
     ; Increased height to accommodate new elements
     guiW := 700
-    guiH := 435
+    guiH := 545
     xPos := px + 10
     yPos := py + 10
     if (xPos + guiW > workAreaRight)
@@ -952,18 +956,30 @@ ShowPreferences() {
     Gui, Add, Text, x450 y125 w230, Custom menu order (comma list):
     Gui, Add, Edit, x450 y145 w230 h50 vCustomMenuOrderBox, % CustomMenuOrder
 
-    Gui, Add, GroupBox, x445 y205 w240 h130
+    Gui, Add, GroupBox, x445 y205 w240 h155
     ; title as a Text label: themed group box titles stay black in Dark Mode
     Gui, Add, Text, x455 y198, % " Smart Parse (highlight + right-click) "
     Gui, Add, Checkbox, x455 y225 w225 vSP_ShowParse Checked%SP_ShowParse%, Smart Parse menu (auto-detect)
     Gui, Add, Checkbox, x455 y250 w225 vSP_ShowTIRADS Checked%SP_ShowTIRADS%, Thyroid ACR TI-RADS
     Gui, Add, Checkbox, x455 y275 w225 vSP_ShowORADS Checked%SP_ShowORADS%, Ovarian cyst (O-RADS / SRU)
     Gui, Add, Checkbox, x455 y300 w225 vSP_ShowBoneAge Checked%SP_ShowBoneAge%, Bone Age (Greulich && Pyle) - MSK
-    Gui, Add, Checkbox, x450 y345 w235 vQuickCallEnabled Checked%QuickCallEnabled%, Quick Call Panel (Ctrl+Alt+P)
+    Gui, Add, Checkbox, x455 y325 w225 vSP_ShowLIRADS Checked%SP_ShowLIRADS%, Liver LI-RADS (CT/MRI v2018)
+
+    ; Quick Call: panel on/off and where calls are placed from
+    dm := QC_GetDialMode()
+    dmIdx := (dm = "cell") ? 2 : (dm = "teams") ? 3 : 1
+    Gui, Add, GroupBox, x445 y375 w240 h115
+    Gui, Add, Text, x455 y368, % " Quick Call (phone panel) "
+    Gui, Add, Checkbox, x455 y393 w225 vQuickCallEnabled Checked%QuickCallEnabled%, Show panel (Ctrl+Alt+P)
+    Gui, Add, Text, x455 y420 w225, Place calls from:
+    Gui, Add, DropDownList, x455 y440 w225 vQC_PrefDial AltSubmit Choose%dmIdx%, This computer (Google Voice)|My cell phone (Google Voice)|Microsoft Teams
+    Gui, Font, s8 c808080
+    Gui, Add, Text, x455 y467 w225, Cell: Google Voice rings your cell first.
+    Gui, Font, s10 %textColor%
 
     ; Buttons at the bottom
-    Gui, Add, Button, x305 y390 w135 gRestoreDefaults %buttonOptions%, Restore Defaults
-    Gui, Add, Button, x450 y390 w135 gSavePreferences %buttonOptions%, Save
+    Gui, Add, Button, x305 y502 w135 gRestoreDefaults %buttonOptions%, Restore Defaults
+    Gui, Add, Button, x450 y502 w135 gSavePreferences %buttonOptions%, Save
 
     if (DarkMode)
         SP_DarkenGui(prefHwnd)      ; checkbox/group text readable on dark
@@ -1002,6 +1018,9 @@ SavePreferences:
     SavePreferencesToFile()
     Gui, Destroy
     QC_ApplyEnabled(QuickCallEnabled)   ; turn the Quick Call panel on/off now
+    qcModes := ["url", "cell", "teams"]
+    if (QC_PrefDial >= 1 && QC_PrefDial <= 3 && qcModes[QC_PrefDial] != QC_GetDialMode())
+        QC_SetDialMode(qcModes[QC_PrefDial])   ; explains the Google Voice setting when switching computer <-> cell
 return
 
 PreferencesGuiClose:
@@ -1085,6 +1104,7 @@ SavePreferencesToFile() {
     IniWrite, %SP_ShowTIRADS%, %tempFile%, SmartParse, ShowTIRADS
     IniWrite, %SP_ShowORADS%, %tempFile%, SmartParse, ShowORADS
     IniWrite, %SP_ShowBoneAge%, %tempFile%, SmartParse, ShowBoneAge
+    IniWrite, %SP_ShowLIRADS%, %tempFile%, SmartParse, ShowLIRADS
 
     ; Write script settings
     IniWrite, %PauseDuration%, %tempFile%, Script, PauseDuration
@@ -4460,6 +4480,13 @@ global QC_EdLV, QC_EdSec, QC_EdLab, QC_EdNum      ; editor GUI control variables
 global QC_Collapsed, QC_W, QC_H, QC_CW, QC_CH       ; panel size / collapse state
 global QC_CMain, QC_CHeads, QC_CCols, QC_CBottom, QC_CTechs, QC_CToggle, QC_CHint, QC_NMain, QC_MaxRows
 
+; ================= STANDALONE =================
+; Only reached when this file is run directly (when #Included it is after ExitApp)
+#SingleInstance, Force      ; same setting the host script already uses
+if (A_LineFile = A_ScriptFullPath)
+    QC_Enable()
+return
+
 ; ================= HOTKEYS =================
 ; Active only while Quick Call is enabled; otherwise the keys pass through.
 #If QC_Enabled
@@ -4476,7 +4503,8 @@ QC_Init() {
 
     ; ---- user settings ----
     QC_OpenAtStart     := true      ; open the panel when the script starts
-    QC_DialMode        := "url"     ; "url" = Google Voice | "teams" = Microsoft Teams | "tel" = tel: link
+    QC_DialMode        := "url"     ; "url" = Google Voice on this computer | "cell" = Google Voice rings your cell
+                                    ; "teams" = Microsoft Teams | "tel" = tel: link
                                     ; (also switchable by right-clicking a panel button; the choice is saved)
     QC_GVAccount       := 0         ; Google account index if signed into several
     QC_AutoConfirm     := true      ; auto-press Call on Google Voice's "Call?" prompt
@@ -4503,7 +4531,7 @@ QC_Init() {
     IniRead, col, %QC_IniFile%, Panel, Collapsed, 0
     QC_Collapsed := (col = "1")
     IniRead, dm, %QC_IniFile%, Settings, DialMode, %A_Space%
-    if RegExMatch(dm, "^(url|teams|tel)$")
+    if RegExMatch(dm, "^(url|cell|teams|tel)$")
         QC_DialMode := dm
     QC_CW := 0, QC_CH := 0
     OnExit("QC_OnExit")
@@ -5116,10 +5144,12 @@ QC_Panel_ContextMenu(GuiHwnd := 0, CtrlHwnd := 0, EventInfo := "", IsRightClick 
     Menu, QCCtx, Add
     Menu, QCCtx, Add, Open phone book editor..., QC_MenuEditor
     Menu, QCCtx, Add
-    Menu, QCCtx, Add, Call with Google Voice, QC_CtxModeGV
-    Menu, QCCtx, Add, Call with Microsoft Teams, QC_CtxModeTeams
-    Menu, QCCtx, % (QC_DialMode = "url" ? "Check" : "Uncheck"), Call with Google Voice
-    Menu, QCCtx, % (QC_DialMode = "teams" ? "Check" : "Uncheck"), Call with Microsoft Teams
+    Menu, QCCtx, Add, Place calls from this computer (Google Voice), QC_CtxModeGV
+    Menu, QCCtx, Add, Place calls from my cell phone (Google Voice), QC_CtxModeCell
+    Menu, QCCtx, Add, Place calls with Microsoft Teams, QC_CtxModeTeams
+    Menu, QCCtx, % (QC_DialMode = "url" ? "Check" : "Uncheck"), Place calls from this computer (Google Voice)
+    Menu, QCCtx, % (QC_DialMode = "cell" ? "Check" : "Uncheck"), Place calls from my cell phone (Google Voice)
+    Menu, QCCtx, % (QC_DialMode = "teams" ? "Check" : "Uncheck"), Place calls with Microsoft Teams
     Menu, QCCtx, Show
 }
 QC_CtxEditNum(p1 := "", p2 := "", p3 := "") {
@@ -5354,19 +5384,53 @@ QC_Dial(num, label := "") {
         MsgBox, 262192, Quick Call, Could not open the dialer link. Is a default browser set?
         return
     }
-    if (QC_AutoConfirm && QC_DialMode = "url")
+    if (QC_AutoConfirm && (QC_DialMode = "url" || QC_DialMode = "cell"))
         SetTimer, QC_ConfirmCall, -250
     QC_LastCall := {label: (label != "" ? label : QC_FormatPhone(d)), time: A_Now}
-    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : ""), 3000)
+    QC_Tip("Calling " QC_LastCall.label "  " QC_FormatPhone(d) (QC_DialMode = "teams" ? "  (Teams)" : QC_DialMode = "cell" ? "  - answer your cell" : ""), 3000)
 }
 
+; Works whether or not the panel has been initialised (Preferences calls these).
+QC_GetDialMode() {
+    if (QC_DialMode != "")
+        return QC_DialMode
+    IniRead, dm, %A_ScriptDir%\QuickCall_Settings.ini, Settings, DialMode, url
+    return RegExMatch(dm, "^(url|cell|teams|tel)$") ? dm : "url"
+}
+QC_DialModeName(mode) {
+    return mode = "cell" ? "your cell phone (Google Voice)" : mode = "teams" ? "Microsoft Teams"
+        : mode = "tel" ? "the phone app (tel:)" : "this computer (Google Voice)"
+}
+
+; Switching between computer and cell needs one Google Voice setting changed;
+; say exactly which one and offer to open the settings page.
 QC_SetDialMode(mode) {
+    old := QC_GetDialMode()
     QC_DialMode := mode
-    IniWrite, %mode%, %QC_IniFile%, Settings, DialMode
-    QC_Tip("Quick Call now dials with " (mode = "teams" ? "Microsoft Teams" : mode = "tel" ? "the phone app (tel:)" : "Google Voice"), 2000)
+    ini := (QC_IniFile != "") ? QC_IniFile : A_ScriptDir "\QuickCall_Settings.ini"
+    IniWrite, %mode%, %ini%, Settings, DialMode
+    acct := (QC_GVAccount != "") ? QC_GVAccount : 0
+    msg := ""
+    if (mode = "cell" && old != "cell")
+        msg := "Quick Call will now place calls from your cell phone.`n`nGoogle Voice rings your cell first: answer it and the call connects. The call audio goes over the cell network, not this computer.`n`nOne-time setup: in Google Voice open Settings > Calls and turn ON ""Always use my phone to place calls"" (your cell must be listed as a linked number).`n`nOpen Google Voice settings now?"
+    else if (mode = "url" && old = "cell")
+        msg := "Quick Call will now place calls from this computer (dictaphone / headset).`n`nIn Google Voice open Settings > Calls and turn OFF ""Always use my phone to place calls"", or Google Voice will keep ringing your cell.`n`nOpen Google Voice settings now?"
+    if (msg != "") {
+        QC_DialogOpen++
+        MsgBox, 262180, Quick Call, %msg%
+        QC_DialogOpen--
+        IfMsgBox, Yes
+            Run, % "https://voice.google.com/u/" acct "/settings"
+        return
+    }
+    note := (mode = "teams") ? "`n(needs outside calling in Teams: a dial pad on the Calls tab)" : ""
+    QC_Tip("Quick Call now places calls from " QC_DialModeName(mode) note, 3000)
 }
 QC_CtxModeGV(p1 := "", p2 := "", p3 := "") {
     QC_SetDialMode("url")
+}
+QC_CtxModeCell(p1 := "", p2 := "", p3 := "") {
+    QC_SetDialMode("cell")
 }
 QC_CtxModeTeams(p1 := "", p2 := "", p3 := "") {
     QC_SetDialMode("teams")
@@ -5509,6 +5573,8 @@ global SP_DataminingPhrase, SP_IncludeDatamining, SP_FleischnerAtEnd, SP_RVLVFor
 global SPB_Bone, SPB_Chrono, SPB_Dob, SPB_Exam, SPB_Sex, SPB_Preview    ; bone age GUI controls
 global SP_Initialized, SP_Pid
 global SP_ShowParse, SP_ShowTIRADS, SP_ShowORADS, SP_ShowBoneAge     ; set by the host (Preferences)
+global SP_ShowLIRADS                                                  ; set by the host (Preferences, off by default)
+global SP_LRHwnd, SP_LRText, SPL_Size, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr, SPL_Preview   ; LI-RADS GUI
 
 SP_Init() {
     if (SP_Initialized)
@@ -6689,7 +6755,7 @@ PE_ByName(name, text) {
 ; ============================================================
 
 ; Right-click menu entries (called from the host's CreateCustomMenu)
-SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false) {
+SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false, showLIRADS := false) {
     Menu, SPAsMenu, Add
     Menu, SPAsMenu, DeleteAll
     Menu, SPAsMenu, Add, Volume (prostate graded), SP_MenuItem
@@ -6710,6 +6776,8 @@ SP_AddMenu(menuName, showTIRADS := true, showORADS := true, showBoneAge := false
     Menu, %menuName%, Add, Smart Parse as..., :SPAsMenu
     if (showBoneAge)
         Menu, %menuName%, Add, Bone Age (Greulich && Pyle), SP_MenuBoneAge
+    if (showLIRADS)
+        Menu, %menuName%, Add, Liver LI-RADS (CT/MRI), SP_MenuLIRADS
 }
 
 SP_MenuItem(itemName := "", itemPos := "", menuName := "") {
@@ -6726,6 +6794,10 @@ SP_MenuItem(itemName := "", itemPos := "", menuName := "") {
 SP_MenuAuto(itemName := "", itemPos := "", menuName := "") {
     if (SP_ShowBoneAge && RegExMatch(g_SelectedText, "i)bone\s+age")) {
         SP_ShowBoneAgeGui(g_SelectedText)
+        return
+    }
+    if (SP_ShowLIRADS && RegExMatch(g_SelectedText, "i)LI-?RADS|\bAPHE\b|arterial\s+(?:phase\s+)?hyper-?enhanc")) {
+        SP_ShowLIRADSGui(g_SelectedText)
         return
     }
     if (g_SelectedText = "") {
@@ -7122,5 +7194,234 @@ SPBone_Close(GuiHwnd := 0) {
 }
 SPBone_Escape(GuiHwnd := 0) {
     SPB_Cancel()
+}
+
+; ================= LIVER: ACR LI-RADS CT/MRI v2018 =================
+; Diagnostic table for an untreated observation in a high-risk patient.
+; PE_LIRADSExtract pre-fills the window from highlighted dictation; the
+; radiologist confirms every feature in the window before inserting.
+PE_LIRADSExtract(text) {
+    t := " " RegExReplace(StrReplace(text, Chr(0xD7), "x"), "\s+", " ") " "
+    ; "peripheral washout" (LR-M feature) vs nonperipheral washout (major feature)
+    t := RegExReplace(t, "i)(?<!non)(?<!non-)(?<!non )peripheral\s+wash-?\s?out", "PERIPHWO")
+    x := {}
+    x.rim := PE_LRHas(t, "(?<!non)(?<!non-)(?<!non )\brim\s+(?:arterial\s+(?:phase\s+)?)?(?:APHE|hyper-?enhanc)")
+    x.aphe := PE_LRHas(t, "\bnon-?\s?rim\s+(?:APHE|arterial|hyper)|\bAPHE\b|arterial(?:\s+phase)?\s+hyper-?enhanc|hyper-?enhanc\w*\s+(?:\w+\s+){0,2}arterial|arterially\s+(?:hyper-?)?enhanc|hypervascular")
+    if (x.rim && !PE_LRHas(t, "\bnon-?\s?rim"))
+        x.aphe := false
+    x.washout := PE_LRHas(t, "wash-?\s?out|de-?enhanc|hypo-?enhanc\w*\s+(?:\w+\s+){0,2}(?:portal|venous|delayed|transitional)")
+    x.capsule := PE_LRHas(t, "(?<!sub)(?<!Glisson)(?<!Glisson's )(?<!liver )(?<!hepatic )capsul")
+    x.growth := PE_LRHas(t, "threshold\s+growth")
+    x.tiv := PE_LRHas(t, "tumou?r\s+in\s+(?:the\s+)?vein|tumou?r\s+thromb|enhancing\s+(?:soft\s+tissue|thrombus)\s+(?:in|within|filling)\s+(?:the\s+)?(?:\w+\s+){0,3}vein|LR-?TIV")
+    x.lrm := x.rim || PE_LRHas(t, "targetoid|PERIPHWO|delayed\s+central\s+enhancement|\bLR-?M\b")
+    ; size: largest dimension in a sentence about the observation
+    mm := 0
+    for _, s in StrSplit(RegExReplace(t, "(?<!\d)\.(?!\d)|;", "`n"), "`n") {
+        if RegExMatch(s, "i)observation|lesion|nodule|mass|focus|\bLR-?\d|APHE|enhanc")
+            mm := Max(mm, PE_TIRADSSize(s) * 10)
+    }
+    x.mm := mm
+    return x
+}
+
+; True if the pattern occurs without "no / without / absent ..." just before it
+; (same clause: stops at . ; , boundaries).
+PE_LRHas(t, pat) {
+    pos := 1
+    while (p := RegExMatch(t, "i)" pat, m, pos)) {
+        pre := SubStr(t, Max(1, p - 45), Min(45, p - 1))
+        pre := RegExReplace(pre, "^.*[.;,]")
+        post := SubStr(t, p + StrLen(m), 40)
+        post := RegExReplace(post, "[.;,].*$")
+        negPre := RegExMatch(pre, "i)\b(?:no|without|absent|absence\s+of|negative\s+for|not|lacks?|lack\s+of)\b")
+        negPost := RegExMatch(post, "i)^\s*(?:is\s+|are\s+|was\s+)?(?:not\s+(?:seen|identified|present|demonstrated|evident)|absent)")
+        if (!negPre && !negPost)
+            return true
+        pos := p + Max(1, StrLen(m))
+    }
+    return false
+}
+
+; anc: 1 = none, 2 = favor malignancy, 3 = favor benignity
+; ovr: 1 = from features, 2 = LR-1, 3 = LR-2, 4 = LR-NC
+PE_LIRADSCalc(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr) {
+    r := {cat: "", base: "", note: ""}
+    if (ovr = 2)
+        r.cat := "LR-1"
+    else if (ovr = 3)
+        r.cat := "LR-2"
+    else if (ovr = 4)
+        r.cat := "LR-NC"
+    else if (tiv)
+        r.cat := "LR-TIV"
+    else if (lrm)
+        r.cat := "LR-M"
+    if (r.cat != "")
+        return r
+    if (mm <= 0)
+        return r
+    n := wo + cap + tg
+    if (!aphe)
+        c := (mm < 20) ? (n >= 2 ? 4 : 3) : (n = 0 ? 3 : 4)
+    else if (mm < 10)
+        c := (n = 0) ? 3 : 4
+    else if (mm < 20)
+        c := (n = 0) ? 3 : (n >= 2 || wo || tg) ? 5 : 4
+    else
+        c := (n = 0) ? 4 : 5
+    r.base := "LR-" c
+    if (anc = 2 && c < 4)
+        c += 1, r.note := "Ancillary features favor malignancy: upgraded from " r.base " (upgrade limited to LR-4)."
+    else if (anc = 2)
+        r.note := "Ancillary features favor malignancy (no upgrade above LR-4 / to LR-5)."
+    else if (anc = 3)
+        c -= 1, r.note := "Ancillary features favor benignity: downgraded from " r.base "."
+    r.cat := "LR-" c
+    return r
+}
+
+PE_LIRADSName(cat) {
+    static names := {"LR-1": "definitely benign", "LR-2": "probably benign", "LR-3": "intermediate probability of malignancy"
+        , "LR-4": "probably HCC", "LR-5": "definitely HCC", "LR-M": "probably or definitely malignant, not HCC specific"
+        , "LR-TIV": "tumor in vein", "LR-NC": "not categorizable"}
+    return names[cat]
+}
+
+PE_LIRADSMgmt(cat) {
+    static m := {"LR-NC": "Repeat or alternative diagnostic imaging in 3 months or less."
+        , "LR-1": "Return to surveillance in 6 months."
+        , "LR-2": "Return to surveillance in 6 months. Consider repeat diagnostic imaging in 6 months or less."
+        , "LR-3": "Repeat or alternative diagnostic imaging in 3-6 months."
+        , "LR-4": "Multidisciplinary discussion for tailored workup, which may include biopsy."
+        , "LR-5": "Multidisciplinary discussion for consensus management."
+        , "LR-M": "Multidisciplinary discussion for tailored workup, often including biopsy."
+        , "LR-TIV": "Multidisciplinary discussion for tailored workup, which may include biopsy."}
+    return m[cat]
+}
+
+PE_LIRADSText(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr) {
+    r := PE_LIRADSCalc(mm, aphe, wo, cap, tg, anc, tiv, lrm, ovr)
+    if (r.cat = "")
+        return ""
+    out := "`n`nLI-RADS (CT/MRI v2018): " r.cat ", " PE_LIRADSName(r.cat) "."
+    if (ovr = 1 && !tiv && !lrm) {
+        f := (aphe ? "nonrim APHE" : "no nonrim APHE")
+        if (wo)
+            f .= ", nonperipheral washout"
+        if (cap)
+            f .= ", enhancing capsule"
+        if (tg)
+            f .= ", threshold growth"
+        out .= "`nObservation: " PE_Fmt(mm) " mm; " f "."
+        if (r.note != "")
+            out .= "`n" r.note
+    }
+    out .= "`nRecommendation: " PE_LIRADSMgmt(r.cat)
+    if (ShowCitations)
+        out .= "`nRef: ACR CT/MRI LI-RADS v2018 Core."
+    return out
+}
+
+; ---------------- LI-RADS window ----------------
+SP_ShowLIRADSGui(prefill := "") {
+    SP_Init()
+    prevGui := A_DefaultGui
+    x := PE_LIRADSExtract(prefill)
+    dark := DarkMode
+    bg := dark ? "1E1E1E" : "F0F0F0", fg := dark ? "E6E6E6" : "000000"
+    sz := x.mm > 0 ? PE_Fmt(x.mm) : ""
+    aphe := x.aphe ? 1 : 0, wo := x.washout ? 1 : 0, cap := x.capsule ? 1 : 0
+    tg := x.growth ? 1 : 0, tiv := x.tiv ? 1 : 0, lrm := x.lrm ? 1 : 0
+    Gui, SPLR:New, +AlwaysOnTop -MinimizeBox +HwndhL +LabelSPLR_, LI-RADS CT/MRI v2018
+    Gui, SPLR:Color, %bg%, % dark ? "2D2D2D" : "FFFFFF"
+    Gui, SPLR:Font, s10 c%fg%, Segoe UI
+    Gui, SPLR:Add, Text, x10 y12 w190, Observation size (mm):
+    Gui, SPLR:Add, Edit, x205 y9 w70 vSPL_Size gSPL_Update, %sz%
+    Gui, SPLR:Add, Checkbox, x10 y+10 w420 vSPL_APHE gSPL_Update Checked%aphe%, Nonrim arterial phase hyperenhancement (APHE)
+    Gui, SPLR:Font, s10 bold c%fg%
+    Gui, SPLR:Add, Text, x10 y+10 w420, Additional major features
+    Gui, SPLR:Font, s10 norm c%fg%
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_WO gSPL_Update Checked%wo%, Nonperipheral washout
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_Cap gSPL_Update Checked%cap%, Enhancing capsule
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TG gSPL_Update Checked%tg%, Threshold growth (size up 50`% or more in 6 months or less)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Ancillary features:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Anc gSPL_Update AltSubmit Choose1, None / not applied|Favor malignancy (up 1, max LR-4)|Favor benignity (down 1)
+    Gui, SPLR:Font, s10 bold c%fg%
+    Gui, SPLR:Add, Text, x10 y+12 w420, These take precedence
+    Gui, SPLR:Font, s10 norm c%fg%
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 vSPL_TIV gSPL_Update Checked%tiv%, Tumor in vein (LR-TIV)
+    Gui, SPLR:Add, Checkbox, x20 y+4 w410 r2 vSPL_LRM gSPL_Update Checked%lrm%, LR-M features (targetoid, rim APHE, peripheral washout, delayed central enhancement)
+    Gui, SPLR:Add, Text, x10 y+12 w140, Category:
+    Gui, SPLR:Add, DropDownList, x150 yp-3 w280 vSPL_Ovr gSPL_Update AltSubmit Choose1, From the features above|LR-1 Definitely benign|LR-2 Probably benign|LR-NC Cannot be categorized
+    Gui, SPLR:Font, s8 c808080
+    Gui, SPLR:Add, Text, x10 y+8 w420, For untreated observations in high-risk patients (cirrhosis, chronic hepatitis B, current or prior HCC). Pre-filled from the highlighted text: check every box before inserting.
+    Gui, SPLR:Font, s10 c%fg%
+    Gui, SPLR:Add, Edit, x10 y+6 w420 r6 ReadOnly vSPL_Preview
+    Gui, SPLR:Add, Button, x10 y+10 w133 Default gSPL_Insert, Insert
+    Gui, SPLR:Add, Button, x+10 yp w133 gSPL_Copy, Copy
+    Gui, SPLR:Add, Button, x+10 yp w134 gSPL_Cancel, Cancel
+    SP_LRHwnd := hL
+    CoordMode, Mouse, Screen
+    MouseGetPos, mx, my
+    mx += 10, my += 10
+    Gui, SPLR:Show, x%mx% y%my% AutoSize
+    if (dark)
+        SP_DarkenGui(hL)
+    SP_FitOnMouseMonitor(hL)
+    SP_Front(hL)
+    GuiControl, SPLR:Focus, SPL_Size
+    SPL_Update()
+    Gui, %prevGui%:Default
+}
+
+SPL_Update(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    if (!SP_LRHwnd)
+        return
+    Gui, SPLR:Submit, NoHide
+    mm := RegExReplace(SPL_Size, "[^\d.]")
+    mm := PE_IsNum(mm) ? mm + 0 : 0
+    SP_LRText := PE_LIRADSText(mm, SPL_APHE, SPL_WO, SPL_Cap, SPL_TG, SPL_Anc, SPL_TIV, SPL_LRM, SPL_Ovr)
+    msg := SP_LRText != "" ? Trim(SP_LRText, "`n") : "Enter the observation size (mm)."
+    GuiControl, SPLR:, SPL_Preview, %msg%
+}
+
+SPL_Insert(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    Critical
+    SPL_Update()
+    if (SP_LRText = "") {
+        MsgBox, 262192, LI-RADS, Enter the observation size first.
+        return
+    }
+    txt := SP_LRText
+    SP_ActivateTarget()
+    Gui, SPLR:Hide
+    if (SP_FleischnerAtEnd)
+        SP_InsertAtEnd(txt)
+    else
+        SP_InsertAfterSelection(txt)
+    SPL_Cancel()
+}
+
+SPL_Copy(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    SPL_Update()
+    if (SP_LRText = "")
+        return
+    Clipboard := Trim(SP_LRText, "`n")
+    SP_Tip("Copied to clipboard")
+}
+
+SPL_Cancel(CtrlHwnd := 0, GuiEvent := "", EventInfo := "", ErrLevel := "") {
+    Gui, SPLR:Destroy
+    SP_LRHwnd := 0
+}
+SPLR_Close(GuiHwnd := 0) {
+    SPL_Cancel()
+}
+SPLR_Escape(GuiHwnd := 0) {
+    SPL_Cancel()
+}
+
+SP_MenuLIRADS(itemName := "", itemPos := "", menuName := "") {
+    SP_ShowLIRADSGui(g_SelectedText)
 }
 ; <<< SMARTPARSE END
